@@ -66,11 +66,11 @@ if __name__ == '__main__':
         os.makedirs(args.logs_dir)
     logger.add(os.path.join(args.logs_dir, f'{args.dataset}-{name_seed}-{str_time}.log'))
     
-    logger.info("Pytorch version: " + torch.__version__)
-    logger.info("CUDA version: " + torch.version.cuda)
-    logger.info(f"CUDA device: + {torch.cuda.current_device()}")
+    logger.info(f"Pytorch version: {torch.__version__}")
+    logger.info(f"CUDA version: {torch.version.cuda}")
+    logger.info(f"CUDA device: {torch.cuda.current_device()}")
     logger.info(f"CUDNN version: {torch.backends.cudnn.version()}")
-    logger.info("GPU name: " + torch.cuda.get_device_name())
+    logger.info(f"GPU name: {torch.cuda.get_device_name()}")
     logger.info("Current Hyper-Parameters:")
     logger.info(args)
     
