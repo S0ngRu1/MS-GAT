@@ -86,6 +86,10 @@ class MMDataset(Dataset):
         return len(self.df)
 
     def __getitem__(self, index):
+        text = None
+        label = None
+        img_path = ''
+        fft_imge = None
         if self.args.dataset in ['Weibo17','Weibo21']:
             _, image_name, text, label = self.df.iloc[index].values
             img_path = self.args.data_dir +'/'+ self.args.dataset +'/new_images/' + image_name
@@ -165,58 +169,19 @@ def MMDataLoader(args):
         train_set = MMDataset(args, mode='train')
         valid_set = MMDataset(args, mode='val')
         test_set = MMDataset(args, mode='test')
-    logger.info(f'Train Dataset: {len(train_set)}')
-    logger.info(f'Valid Dataset: {len(valid_set)}')
-    logger.info(f'Test Dataset: {len(test_set)}')
-    train_loader = DataLoader(train_set, batch_size=args.batch_size, num_workers=0,
-                       shuffle=False, pin_memory=False, drop_last=True,collate_fn=custom_collate_fn)
-    valid_loader = DataLoader(valid_set, batch_size=args.batch_size, num_workers=0,
-                       shuffle=False, pin_memory=False, drop_last=True,collate_fn=custom_collate_fn)
-    test_loader = DataLoader(test_set, batch_size=args.batch_size, num_workers=0,
-                       shuffle=False, pin_memory=False, drop_last=True,collate_fn=custom_collate_fn)
-    return train_loader, valid_loader, test_loader
-
-
-
-
-class TextDataset(Dataset):
-    def __init__(self, args, mode):
-        self.args = args
-        self.save = []
-        self.max_length = 256
-        if args.dataset in ['Weibo17','Weibo21']:
-            self.df = pd.read_csv('datasets/'+args.dataset+'/'+mode + '.csv', encoding='utf-8').fillna("")
-        else:
-            logger.info('数据集无效')
-            return
-        self.text_tokenizer = TextEncoder(pretrained_dir=args.pretrained_dir, text_encoder=args.text_encoder).get_tokenizer()
-
-    def __len__(self):
-        return len(self.df)
-
-    def __getitem__(self, index):
-        if self.args.dataset in ['Weibo17','Weibo21']:
-            tweet_id, image_name, text, label = self.df.iloc[index].values
-            text = preprocess_text(text)
-        text_tokens = self.text_tokenizer(text, max_length=self.max_length, add_special_tokens=True, truncation=True,
-                                     padding='max_length', return_tensors="pt")
-        return text_tokens['input_ids'], text_tokens['token_type_ids'], text_tokens['attention_mask'], label
-        
-def TextDataLoader(args):
-    if args.dataset in ['Weibo17','Weibo21']:
-        train_set = TextDataset(args, mode='train')
-        valid_set = TextDataset(args, mode='val')
-        test_set = TextDataset(args, mode='test')
-    logger.info(f'Train Dataset: {len(train_set)}')
-    logger.info(f'Valid Dataset: {len(valid_set)}')
-    logger.info(f'Test Dataset: {len(test_set)}')
-    train_loader = DataLoader(train_set, batch_size=args.batch_size, num_workers=0,
-                       shuffle=False, pin_memory=False, drop_last=True,collate_fn=custom_collate_fn)
-    valid_loader = DataLoader(valid_set, batch_size=args.batch_size, num_workers=0,
-                       shuffle=False, pin_memory=False, drop_last=True,collate_fn=custom_collate_fn)
-    test_loader = DataLoader(test_set, batch_size=args.batch_size, num_workers=0,
-                       shuffle=False, pin_memory=False, drop_last=True,collate_fn=custom_collate_fn)
-    return train_loader, valid_loader, test_loader
+        logger.info(f'Train Dataset: {len(train_set)}')
+        logger.info(f'Valid Dataset: {len(valid_set)}')
+        logger.info(f'Test Dataset: {len(test_set)}')
+        train_loader = DataLoader(train_set, batch_size=args.batch_size, num_workers=0,
+                        shuffle=False, pin_memory=False, drop_last=True,collate_fn=custom_collate_fn)
+        valid_loader = DataLoader(valid_set, batch_size=args.batch_size, num_workers=0,
+                        shuffle=False, pin_memory=False, drop_last=True,collate_fn=custom_collate_fn)
+        test_loader = DataLoader(test_set, batch_size=args.batch_size, num_workers=0,
+                        shuffle=False, pin_memory=False, drop_last=True,collate_fn=custom_collate_fn)
+        return train_loader, valid_loader, test_loader
+    else:
+        logger.info('数据集无效')
+        return None, None, None
 
 
 class TextDataset(Dataset):
@@ -238,25 +203,31 @@ class TextDataset(Dataset):
         if self.args.dataset in ['Weibo17','Weibo21']:
             tweet_id, image_name, text, label = self.df.iloc[index].values
             text = preprocess_text(text)
-        text_tokens = self.text_tokenizer(text, max_length=self.max_length, add_special_tokens=True, truncation=True,
+            text_tokens = self.text_tokenizer(text, max_length=self.max_length, add_special_tokens=True, truncation=True,
                                      padding='max_length', return_tensors="pt")
-        return text_tokens['input_ids'], text_tokens['token_type_ids'], text_tokens['attention_mask'], label
+            return text_tokens['input_ids'], text_tokens['token_type_ids'], text_tokens['attention_mask'], label
+        else:
+            logger.info('数据集无效')
+            return None, None, None, None
         
 def TextDataLoader(args):
     if args.dataset in ['Weibo17','Weibo21']:
         train_set = TextDataset(args, mode='train')
         valid_set = TextDataset(args, mode='val')
         test_set = TextDataset(args, mode='test')
-    logger.info(f'Train Dataset: {len(train_set)}')
-    logger.info(f'Valid Dataset: {len(valid_set)}')
-    logger.info(f'Test Dataset: {len(test_set)}')
-    train_loader = DataLoader(train_set, batch_size=args.batch_size, num_workers=0,
-                       shuffle=False, pin_memory=False, drop_last=True,collate_fn=custom_collate_fn)
-    valid_loader = DataLoader(valid_set, batch_size=args.batch_size, num_workers=0,
-                       shuffle=False, pin_memory=False, drop_last=True,collate_fn=custom_collate_fn)
-    test_loader = DataLoader(test_set, batch_size=args.batch_size, num_workers=0,
-                       shuffle=False, pin_memory=False, drop_last=True,collate_fn=custom_collate_fn)
-    return train_loader, valid_loader, test_loader
+        logger.info(f'Train Dataset: {len(train_set)}')
+        logger.info(f'Valid Dataset: {len(valid_set)}')
+        logger.info(f'Test Dataset: {len(test_set)}')
+        train_loader = DataLoader(train_set, batch_size=args.batch_size, num_workers=0,
+                        shuffle=False, pin_memory=False, drop_last=True,collate_fn=custom_collate_fn)
+        valid_loader = DataLoader(valid_set, batch_size=args.batch_size, num_workers=0,
+                        shuffle=False, pin_memory=False, drop_last=True,collate_fn=custom_collate_fn)
+        test_loader = DataLoader(test_set, batch_size=args.batch_size, num_workers=0,
+                        shuffle=False, pin_memory=False, drop_last=True,collate_fn=custom_collate_fn)
+        return train_loader, valid_loader, test_loader
+    else:
+        logger.info('数据集无效')
+        return None, None, None
 
 
 
@@ -282,20 +253,19 @@ class ImageDataset(Dataset):
         if self.args.dataset in ['Weibo17','Weibo21']:
             tweet_id, image_name, text, label = self.df.iloc[index].values
             img_path = self.args.data_dir +'/'+ self.args.dataset +'/new_images/' + image_name
-        
-        original_shape = (1, 3, 224, 224)
-        zero_img_inputs = torch.zeros(original_shape)
-        try:
-            if os.path.exists(img_path) and os.path.isfile(img_path):
-                image = Image.open(os.path.join(img_path)).convert("RGB")
-                image = self.transforms(image)
-                img_inputs = self.image_tokenizer(images=image, return_tensors="pt").pixel_values
-            else:
-                img_inputs = zero_img_inputs
-        except OSError as e:
-            print(f"Error loading image {img_path}: {e}")
-            img_inputs = zero_img_inputs  
-        return img_inputs, label
+            original_shape = (1, 3, 224, 224)
+            zero_img_inputs = torch.zeros(original_shape)
+            try:
+                if os.path.exists(img_path) and os.path.isfile(img_path):
+                    image = Image.open(os.path.join(img_path)).convert("RGB")
+                    image = self.transforms(image)
+                    img_inputs = self.image_tokenizer(images=image, return_tensors="pt").pixel_values
+                else:
+                    img_inputs = zero_img_inputs
+            except OSError as e:
+                print(f"Error loading image {img_path}: {e}")
+                img_inputs = zero_img_inputs  
+            return img_inputs, label
     
 
         
@@ -304,33 +274,38 @@ def ImageDataLoader(args):
         train_set = ImageDataset(args, mode='train')
         valid_set = ImageDataset(args, mode='val')
         test_set = ImageDataset(args, mode='test')
-    logger.info(f'Train Dataset: {len(train_set)}')
-    logger.info(f'Valid Dataset: {len(valid_set)}')
-    logger.info(f'Test Dataset: {len(test_set)}')
-    train_loader = DataLoader(train_set, batch_size=args.batch_size, num_workers=0,
-                       shuffle=False, pin_memory=False, drop_last=True,collate_fn=custom_collate_fn)
-    valid_loader = DataLoader(valid_set, batch_size=args.batch_size, num_workers=0,
-                       shuffle=False, pin_memory=False, drop_last=True,collate_fn=custom_collate_fn)
-    test_loader = DataLoader(test_set, batch_size=args.batch_size, num_workers=0,
-                       shuffle=False, pin_memory=False, drop_last=True,collate_fn=custom_collate_fn)
-    return train_loader, valid_loader, test_loader
-
+        logger.info(f'Train Dataset: {len(train_set)}')
+        logger.info(f'Valid Dataset: {len(valid_set)}')
+        logger.info(f'Test Dataset: {len(test_set)}')
+        train_loader = DataLoader(train_set, batch_size=args.batch_size, num_workers=0,
+                        shuffle=False, pin_memory=False, drop_last=True,collate_fn=custom_collate_fn)
+        valid_loader = DataLoader(valid_set, batch_size=args.batch_size, num_workers=0,
+                        shuffle=False, pin_memory=False, drop_last=True,collate_fn=custom_collate_fn)
+        test_loader = DataLoader(test_set, batch_size=args.batch_size, num_workers=0,
+                        shuffle=False, pin_memory=False, drop_last=True,collate_fn=custom_collate_fn)
+        return train_loader, valid_loader, test_loader
+    else:
+        logger.info('数据集无效')
+        return None, None, None
 
 def GraphDataLoader(args):
     if args.dataset in ['Weibo17','Weibo21','CFND_dataset']:
         train_set = GraphDataset(args, mode='train')
         valid_set = GraphDataset(args, mode='val')
         test_set = GraphDataset(args, mode='test')
-    logger.info(f'Train Dataset: {len(train_set)}')
-    logger.info(f'Valid Dataset: {len(valid_set)}')
-    logger.info(f'Test Dataset: {len(test_set)}')
-    train_loader = DataLoader(train_set, batch_size=args.batch_size, num_workers=0,
-                       shuffle=False, pin_memory=False, drop_last=True,collate_fn=custom_collate_fn)
-    valid_loader = DataLoader(valid_set, batch_size=args.batch_size, num_workers=0,
-                       shuffle=False, pin_memory=False, drop_last=True,collate_fn=custom_collate_fn)
-    test_loader = DataLoader(test_set, batch_size=args.batch_size, num_workers=0,
-                       shuffle=False, pin_memory=False, drop_last=True,collate_fn=custom_collate_fn)
-    return train_loader, valid_loader, test_loader
+        logger.info(f'Train Dataset: {len(train_set)}')
+        logger.info(f'Valid Dataset: {len(valid_set)}')
+        logger.info(f'Test Dataset: {len(test_set)}')
+        train_loader = DataLoader(train_set, batch_size=args.batch_size, num_workers=0,
+                        shuffle=False, pin_memory=False, drop_last=True,collate_fn=custom_collate_fn)
+        valid_loader = DataLoader(valid_set, batch_size=args.batch_size, num_workers=0,
+                        shuffle=False, pin_memory=False, drop_last=True,collate_fn=custom_collate_fn)
+        test_loader = DataLoader(test_set, batch_size=args.batch_size, num_workers=0,
+                        shuffle=False, pin_memory=False, drop_last=True,collate_fn=custom_collate_fn)
+        return train_loader, valid_loader, test_loader
+    else:
+        logger.info('数据集无效')
+        return None, None, None
 
 
 class GraphDataset(Dataset):
@@ -376,6 +351,12 @@ class GraphDataset(Dataset):
         return len(self.df)
 
     def __getitem__(self, index):
+        text = None
+        label = None
+        img_path = ''
+        fft_imge = None
+        text_ner = []
+        image_ner = []
         if self.args.dataset in ['Weibo17','Weibo21']:
             _, image_name, text, label = self.df.iloc[index].values
             img_path = self.args.data_dir +'/'+ self.args.dataset +'/new_images/' + image_name
@@ -399,12 +380,13 @@ class GraphDataset(Dataset):
             image_ner = plain_text_ner + obj_list
             img_path = os.path.join(self.args.data_dir,self.args.dataset, image)
             text = preprocess_text(title)
+            
         image_entity_embeds = []
         text_entity_embeds = []
         graph_data = None
         sentiment_output = sentiment_predict(text, self.sentiment_config, self.sentiment_model)
         if self.args.method in ['FND-2-SGAT','Weibo17','Weibo21']:
-            text_tokens = self.text_tokenizer(text, max_length=self.max_length, add_special_tokens=True, truncation=True,
+            text_tokens = self.text_tokenizer(text, max_length=self.max_length, add_special_tokens=True, truncation=True, 
                                         padding='max_length', return_tensors="pt")
             original_shape = (1, 3, 224, 224)
             zero_img_inputs = torch.zeros(original_shape)

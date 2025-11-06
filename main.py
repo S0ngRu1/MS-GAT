@@ -44,8 +44,8 @@ if __name__ == '__main__':
     parser.add_argument('--data_dir', type=str, default='datasets', help='data_dir')
     parser.add_argument('--train_test', type=bool, default=True, help='train+test or test only')
     parser.add_argument('--pretrained_dir', type=str, default='Pretrained', help='path to pretrained models from Hugging Face.')
-    parser.add_argument('--model_save_dir', type=str, default='results/models', help='path to save model parameters.')
-    parser.add_argument('--res_save_dir', type=str, default='results/results', help='path to save training results.')
+    parser.add_argument('--model_save_dir', type=str, default='results/models_weigts', help='path to save model parameters.')
+    parser.add_argument('--res_save_dir', type=str, default='results/plot_results', help='path to save training results.')
     parser.add_argument('--logs_dir', type=str, default='results/logs', help='path to log results.') 
     parser.add_argument('--seed', nargs='+', default=1, help='List of random seeds')
 
