@@ -11,8 +11,8 @@ from torchvision import transforms
 import os
 import shutil
 from model.model import MyModel
-from model.TextEncoder import TextEncoder
-from model.ImageEncoder import ImageEncoder
+from model.text_encoder import TextEncoder
+from model.image_encoder import ImageEncoder
 from data.dataloader import preprocess_text
 
 

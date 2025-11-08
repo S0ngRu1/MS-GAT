@@ -1,7 +1,6 @@
 import re
 import os
-import random
-import logging
+from loguru import logger
 from PIL import Image
 import pandas as pd
 import torch
@@ -12,130 +11,19 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
-import torchvision.transforms as transforms
-from model.TextEncoder import TextEncoder
-from model.ImageEncoder import ImageEncoder
+from model.text_encoder import TextEncoder
+from model.image_encoder import ImageEncoder
 from model.clip_encoder import ClipEncoder
 from model.fft import extract_spectral_features
 from Sentiment_demo import predict_one as sentiment_predict, Config as sentiment_config, Model as sentiment_model
 import torch
 from torch.utils.data import DataLoader
 from torch_geometric.data import Batch
-from torch.utils.data import Dataset
 import pandas as pd
 from PIL import Image
 import os
 import numpy as np
-import logging
 
-
-__all__ = ['MMDataLoader','TextDataLoader','ImageDataLoader']
-logger = logging.getLogger('')
-
-
-def preprocess_text(sen):
-    # Removing html tags
-    sentence = re.sub(r'<[^>]+>', '', sen)
-    # Remove punctuations and numbers
-    sentence = sentence.strip()
-    # Single character removal
-    sentence = re.sub(r'[^\u4e00-\u9fa5]', ' ', sentence)
-    # Removing multiple spaces
-    sentence = re.sub(r'\s+', ' ', sentence)
-    return sentence
-
-# Data Aug
-def get_transforms():
-    return transforms.Compose(
-        [
-            transforms.RandomHorizontalFlip(),
-        ]
-    )
-
-
-logger = logging.getLogger(__name__)
-
-class MMDataset(Dataset):
-    def __init__(self, args, mode):
-        self.args = args
-        self.save = []
-        self.max_length = 256
-        if args.dataset in ['Weibo17','Weibo21']:
-            self.df = pd.read_csv('datasets/'+args.dataset+'/'+mode + '.csv', encoding='utf-8').fillna("")
-        elif args.dataset in ['CFND_dataset']:
-            self.df = pd.read_csv('datasets/'+args.dataset+'/'+mode + '_data.csv', encoding='utf-8').fillna("")
-
-        else:
-            logger.info('数据集无效')
-            return
-        if self.args.method in ['FND-2-CLIP']:
-            self.clip_encoder = ClipEncoder(self.args, pretrained_dir=args.pretrained_dir)
-        else:
-            self.text_tokenizer = TextEncoder(pretrained_dir=args.pretrained_dir, text_encoder=args.text_encoder).get_tokenizer()
-            self.image_tokenizer = ImageEncoder(pretrained_dir=args.pretrained_dir, image_encoder=args.image_encoder).get_tokenizer()
-        self.img_width = 224
-        self.img_height = 224
-        self.depth = 3
-        self.transforms = get_transforms()
-        self.sentiment_config = sentiment_config()
-        self.sentiment_config.device = args.device
-        self.sentiment_model = sentiment_model(self.sentiment_config).to(self.sentiment_config.device)
-
-
-    def __len__(self):
-        return len(self.df)
-
-    def __getitem__(self, index):
-        text = None
-        label = None
-        img_path = ''
-        fft_imge = None
-        if self.args.dataset in ['Weibo17','Weibo21']:
-            _, image_name, text, label = self.df.iloc[index].values
-            img_path = self.args.data_dir +'/'+ self.args.dataset +'/new_images/' + image_name
-            text = preprocess_text(text)
-        
-        elif self.args.dataset in ['CFND_dataset']:
-            _, title, image, label = self.df.iloc[index].values
-            img_path = os.path.join(self.args.data_dir,self.args.dataset, image)
-            text = preprocess_text(title)
-            
-        
-        sentiment_output = sentiment_predict(text, self.sentiment_config, self.sentiment_model)
-        if self.args.method not in ['FND-2-CLIP']:
-            text_tokens = self.text_tokenizer(text, max_length=self.max_length, add_special_tokens=True, truncation=True,
-                                        padding='max_length', return_tensors="pt")
-            original_shape = (1, 3, 224, 224)
-            zero_img_inputs = torch.zeros(original_shape)
-            try:
-                if os.path.exists(img_path) and os.path.isfile(img_path):
-                    image = Image.open(os.path.join(img_path)).convert("RGB")
-                    image = self.transforms(image)
-                    fft_imge = extract_spectral_features(img_path,output_dim=(128, 128))
-                    fft_imge = torch.tensor(fft_imge).to(self.args.device)
-                    img_inputs = self.image_tokenizer(images=image, return_tensors="pt").pixel_values
-                else:
-                    img_inputs = zero_img_inputs
-            except Exception as e:
-                print(f"Error loading image {img_path}: {e}")
-                img_inputs = zero_img_inputs
-            return img_inputs, fft_imge, sentiment_output, text_tokens['input_ids'], text_tokens['token_type_ids'], text_tokens['attention_mask'], label
-        
-        
-        else:
-            text_feature = None
-            try:
-                if os.path.exists(img_path) and os.path.isfile(img_path):
-                    fft_imge = extract_spectral_features(img_path,output_dim=(128, 128))
-                    fft_imge = torch.tensor(fft_imge).to(self.args.device)
-                    text_feature,img_feature =  self.clip_encoder.get_features(text,img_path)
-                else:
-                    img_feature = torch.randn((1, 768))
-            except Exception as e:
-                print(f"Error loading image {img_path}: {e}")
-                img_feature = torch.randn((1, 768))
-            return img_feature, fft_imge, sentiment_output, text_feature, label
-        
         
 def custom_collate_fn(batch):
     # 过滤掉无效的 Data 对象及其对应的其他数据
@@ -145,7 +33,7 @@ def custom_collate_fn(batch):
             valid_batch.append(item)
     
     if not valid_batch:
-        logging.warning("No valid data found in the batch. Skipping this batch.")
+        logger.warning("No valid data found in the batch. Skipping this batch.")
         # 可以选择返回 None 或者一个默认值
         return None
     
@@ -184,109 +72,6 @@ def MMDataLoader(args):
         return None, None, None
 
 
-class TextDataset(Dataset):
-    def __init__(self, args, mode):
-        self.args = args
-        self.save = []
-        self.max_length = 256
-        if args.dataset in ['Weibo17','Weibo21']:
-            self.df = pd.read_csv('datasets/'+args.dataset+'/'+mode + '.csv', encoding='utf-8').fillna("")
-        else:
-            logger.info('数据集无效')
-            return
-        self.text_tokenizer = TextEncoder(pretrained_dir=args.pretrained_dir, text_encoder=args.text_encoder).get_tokenizer()
-
-    def __len__(self):
-        return len(self.df)
-
-    def __getitem__(self, index):
-        if self.args.dataset in ['Weibo17','Weibo21']:
-            tweet_id, image_name, text, label = self.df.iloc[index].values
-            text = preprocess_text(text)
-            text_tokens = self.text_tokenizer(text, max_length=self.max_length, add_special_tokens=True, truncation=True,
-                                     padding='max_length', return_tensors="pt")
-            return text_tokens['input_ids'], text_tokens['token_type_ids'], text_tokens['attention_mask'], label
-        else:
-            logger.info('数据集无效')
-            return None, None, None, None
-        
-def TextDataLoader(args):
-    if args.dataset in ['Weibo17','Weibo21']:
-        train_set = TextDataset(args, mode='train')
-        valid_set = TextDataset(args, mode='val')
-        test_set = TextDataset(args, mode='test')
-        logger.info(f'Train Dataset: {len(train_set)}')
-        logger.info(f'Valid Dataset: {len(valid_set)}')
-        logger.info(f'Test Dataset: {len(test_set)}')
-        train_loader = DataLoader(train_set, batch_size=args.batch_size, num_workers=0,
-                        shuffle=False, pin_memory=False, drop_last=True,collate_fn=custom_collate_fn)
-        valid_loader = DataLoader(valid_set, batch_size=args.batch_size, num_workers=0,
-                        shuffle=False, pin_memory=False, drop_last=True,collate_fn=custom_collate_fn)
-        test_loader = DataLoader(test_set, batch_size=args.batch_size, num_workers=0,
-                        shuffle=False, pin_memory=False, drop_last=True,collate_fn=custom_collate_fn)
-        return train_loader, valid_loader, test_loader
-    else:
-        logger.info('数据集无效')
-        return None, None, None
-
-
-
-class ImageDataset(Dataset):
-    def __init__(self, args, mode):
-        self.args = args
-        self.save = []
-        self.image_tokenizer = ImageEncoder(pretrained_dir=args.pretrained_dir, image_encoder=args.image_encoder).get_tokenizer()
-        self.img_width = 224
-        self.img_height = 224
-        self.depth = 3
-        self.transforms = get_transforms()
-        if args.dataset in ['Weibo17','Weibo21']:
-            self.df = pd.read_csv('datasets/'+args.dataset+'/'+mode + '.csv', encoding='utf-8').fillna("")
-        else:
-            logger.info('数据集无效')
-            return
-
-    def __len__(self):
-        return len(self.df)
-
-    def __getitem__(self, index):
-        if self.args.dataset in ['Weibo17','Weibo21']:
-            tweet_id, image_name, text, label = self.df.iloc[index].values
-            img_path = self.args.data_dir +'/'+ self.args.dataset +'/new_images/' + image_name
-            original_shape = (1, 3, 224, 224)
-            zero_img_inputs = torch.zeros(original_shape)
-            try:
-                if os.path.exists(img_path) and os.path.isfile(img_path):
-                    image = Image.open(os.path.join(img_path)).convert("RGB")
-                    image = self.transforms(image)
-                    img_inputs = self.image_tokenizer(images=image, return_tensors="pt").pixel_values
-                else:
-                    img_inputs = zero_img_inputs
-            except OSError as e:
-                print(f"Error loading image {img_path}: {e}")
-                img_inputs = zero_img_inputs  
-            return img_inputs, label
-    
-
-        
-def ImageDataLoader(args):
-    if args.dataset in ['Weibo17','Weibo21']:
-        train_set = ImageDataset(args, mode='train')
-        valid_set = ImageDataset(args, mode='val')
-        test_set = ImageDataset(args, mode='test')
-        logger.info(f'Train Dataset: {len(train_set)}')
-        logger.info(f'Valid Dataset: {len(valid_set)}')
-        logger.info(f'Test Dataset: {len(test_set)}')
-        train_loader = DataLoader(train_set, batch_size=args.batch_size, num_workers=0,
-                        shuffle=False, pin_memory=False, drop_last=True,collate_fn=custom_collate_fn)
-        valid_loader = DataLoader(valid_set, batch_size=args.batch_size, num_workers=0,
-                        shuffle=False, pin_memory=False, drop_last=True,collate_fn=custom_collate_fn)
-        test_loader = DataLoader(test_set, batch_size=args.batch_size, num_workers=0,
-                        shuffle=False, pin_memory=False, drop_last=True,collate_fn=custom_collate_fn)
-        return train_loader, valid_loader, test_loader
-    else:
-        logger.info('数据集无效')
-        return None, None, None
 
 def GraphDataLoader(args):
     if args.dataset in ['Weibo17','Weibo21','CFND_dataset']:
@@ -314,11 +99,11 @@ class GraphDataset(Dataset):
         self.save = []
         self.max_length = 256
         if args.dataset in ['Weibo17','Weibo21']:
-            self.df = pd.read_csv('datasets/'+args.dataset+'/'+mode + '.csv', encoding='utf-8').fillna("")
-            self.entity_df = pd.read_json('datasets/'+args.dataset+'/'+'processed_data_'+mode + '.json', encoding='utf-8').fillna("")
+            self.df = pd.read_csv('datasets/'+args.dataset+'/'+mode + '.csv', encoding='utf-8').dropna()
+            self.entity_df = pd.read_json('datasets/'+args.dataset+'/'+'processed_data_'+mode + '.json', encoding='utf-8').dropna()
         elif args.dataset in ['CFND_dataset']:
-            self.entity_df = pd.read_json('datasets/'+args.dataset+'/'+'processed_data_'+mode + '.json', encoding='utf-8').fillna("")          
-            self.df = pd.read_csv('datasets/'+args.dataset+'/'+mode + '_data.csv', encoding='utf-8').fillna("")
+            self.entity_df = pd.read_json('datasets/'+args.dataset+'/'+'processed_data_'+mode + '.json', encoding='utf-8').dropna()          
+            self.df = pd.read_csv('datasets/'+args.dataset+'/'+mode + '_data.csv', encoding='utf-8').dropna()
             
 
         else:

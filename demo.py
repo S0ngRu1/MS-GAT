@@ -1,4 +1,4 @@
-from model.ImageEncoder import ImageEncoder
+from model.image_encoder import ImageEncoder
 from PIL import Image
 import requests
 url = "http://images.cocodataset.org/val2017/000000039769.jpg"

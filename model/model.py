@@ -5,8 +5,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import GATConv, global_mean_pool
 from torch_geometric.data import Data
-from model.TextEncoder import TextEncoder
-from model.ImageEncoder import ImageEncoder
+from model.text_encoder import TextEncoder
+from model.image_encoder import ImageEncoder
 
 def xavier_init(m):
     if type(m) == nn.Linear:
