@@ -7,15 +7,13 @@ import torch
 import torch.nn.functional as F
 from torch_geometric.data import Data
 from typing import List, Tuple
-import sys
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from model.text_encoder import TextEncoder
 from model.image_encoder import ImageEncoder
 from model.clip_encoder import ClipEncoder
 from model.fft import extract_spectral_features
-from Sentiment_demo import predict_one as sentiment_predict, Config as sentiment_config, Model as sentiment_model
+from model.sentiment_analysis import SentimentConfig , SentimentModel, predict_one as sentiment_predict
 import torch
 from torch.utils.data import DataLoader
 from torch_geometric.data import Batch
@@ -24,17 +22,13 @@ from PIL import Image
 import os
 import numpy as np
 
+from utils.process_data import get_transforms, preprocess_text
+
         
 def custom_collate_fn(batch):
-    # 过滤掉无效的 Data 对象及其对应的其他数据
-    valid_batch = []
-    for item in batch:
-        if isinstance(item[6], Data):  # 检查图数据是否有效
-            valid_batch.append(item)
-    
+    valid_batch = [item for item in batch if item and isinstance(item[6], Data)]
     if not valid_batch:
         logger.warning("No valid data found in the batch. Skipping this batch.")
-        # 可以选择返回 None 或者一个默认值
         return None
     
     # 提取图数据
@@ -51,26 +45,6 @@ def custom_collate_fn(batch):
     batch_label = torch.tensor([item[7] for item in valid_batch])
 
     return (batch_image, fft_image, sentiment_output, text_input_ids, text_token_type_ids, text_attention_mask, graph_batch, batch_label)
-
-def MMDataLoader(args):
-    if args.dataset in ['Weibo17','Weibo21','CFND_dataset']:
-        train_set = MMDataset(args, mode='train')
-        valid_set = MMDataset(args, mode='val')
-        test_set = MMDataset(args, mode='test')
-        logger.info(f'Train Dataset: {len(train_set)}')
-        logger.info(f'Valid Dataset: {len(valid_set)}')
-        logger.info(f'Test Dataset: {len(test_set)}')
-        train_loader = DataLoader(train_set, batch_size=args.batch_size, num_workers=0,
-                        shuffle=False, pin_memory=False, drop_last=True,collate_fn=custom_collate_fn)
-        valid_loader = DataLoader(valid_set, batch_size=args.batch_size, num_workers=0,
-                        shuffle=False, pin_memory=False, drop_last=True,collate_fn=custom_collate_fn)
-        test_loader = DataLoader(test_set, batch_size=args.batch_size, num_workers=0,
-                        shuffle=False, pin_memory=False, drop_last=True,collate_fn=custom_collate_fn)
-        return train_loader, valid_loader, test_loader
-    else:
-        logger.info('数据集无效')
-        return None, None, None
-
 
 
 def GraphDataLoader(args):
@@ -89,37 +63,31 @@ def GraphDataLoader(args):
                         shuffle=False, pin_memory=False, drop_last=True,collate_fn=custom_collate_fn)
         return train_loader, valid_loader, test_loader
     else:
-        logger.info('数据集无效')
-        return None, None, None
+        logger.error(f'无效数据集: {args.dataset}，支持的数据集为 ["Weibo17", "Weibo21", "CFND_dataset"]')
+        raise ValueError("无效数据集，请检查参数")
 
 
 class GraphDataset(Dataset):
     def __init__(self, args, mode):
         self.args = args
         self.save = []
-        self.max_length = 256
+        self.max_length = 512
         if args.dataset in ['Weibo17','Weibo21']:
             self.df = pd.read_csv('datasets/'+args.dataset+'/'+mode + '.csv', encoding='utf-8').dropna()
             self.entity_df = pd.read_json('datasets/'+args.dataset+'/'+'processed_data_'+mode + '.json', encoding='utf-8').dropna()
         elif args.dataset in ['CFND_dataset']:
             self.entity_df = pd.read_json('datasets/'+args.dataset+'/'+'processed_data_'+mode + '.json', encoding='utf-8').dropna()          
             self.df = pd.read_csv('datasets/'+args.dataset+'/'+mode + '_data.csv', encoding='utf-8').dropna()
-            
-
         else:
-            logger.info('数据集无效')
-            return
+            logger.error(f'无效数据集: {args.dataset}，支持的数据集为 ["Weibo17", "Weibo21", "CFND_dataset"]')
+            raise ValueError("无效数据集，请检查参数")
         if self.args.method in ['FND-2-CLIP']:
             self.clip_encoder = ClipEncoder(self.args, pretrained_dir=args.pretrained_dir)
         elif self.args.method in ['FND-2-SGAT']:
             self.clip_encoder = ClipEncoder(self.args, pretrained_dir=args.pretrained_dir)
             self.text_tokenizer = TextEncoder(pretrained_dir=args.pretrained_dir, text_encoder=args.text_encoder).get_tokenizer()
             self.image_tokenizer = ImageEncoder(pretrained_dir=args.pretrained_dir, image_encoder=args.image_encoder).get_tokenizer()
-            self.graph_builder = GraphBuilder(
-                similarity_threshold_text=0.5,
-                similarity_threshold_image=0.5,
-                similarity_threshold_cross=0.5
-            )
+            self.graph_builder = GraphBuilder(similarity_threshold_text=0.6, similarity_threshold_image=0.6, similarity_threshold_cross=0.6)
         else:
             self.text_tokenizer = TextEncoder(pretrained_dir=args.pretrained_dir, text_encoder=args.text_encoder).get_tokenizer()
             self.image_tokenizer = ImageEncoder(pretrained_dir=args.pretrained_dir, image_encoder=args.image_encoder).get_tokenizer()
@@ -127,9 +95,9 @@ class GraphDataset(Dataset):
         self.img_height = 224
         self.depth = 3
         self.transforms = get_transforms()
-        self.sentiment_config = sentiment_config()
+        self.sentiment_config = SentimentConfig()
         self.sentiment_config.device = args.device
-        self.sentiment_model = sentiment_model(self.sentiment_config).to(self.sentiment_config.device)
+        self.sentiment_model = SentimentModel(self.sentiment_config).to(self.sentiment_config.device)
 
 
     def __len__(self):
@@ -142,70 +110,60 @@ class GraphDataset(Dataset):
         fft_imge = None
         text_ner = []
         image_ner = []
+        
         if self.args.dataset in ['Weibo17','Weibo21']:
-            _, image_name, text, label = self.df.iloc[index].values
-            img_path = self.args.data_dir +'/'+ self.args.dataset +'/new_images/' + image_name
-            text = preprocess_text(text)
-            entity_data = self.entity_df.iloc[index]
-            text_ner = entity_data['title_ner']
-            plain_text_ner = entity_data.get("plain_text_ner", [])
-            obj_list = entity_data.get("obj_list", [])
-            if obj_list == '':
-                obj_list = []
-            image_ner = plain_text_ner + obj_list
+            image_name, text, label = self.df.iloc[index, 1:4].values
+            img_path = os.path.join(self.args.data_dir, self.args.dataset, 'new_images', image_name)
         
         elif self.args.dataset in ['CFND_dataset']:
-            _, title, image, label = self.df.iloc[index].values
-            entity_data = self.entity_df.iloc[index]
-            text_ner = entity_data['title_ner']
-            plain_text_ner = entity_data.get("plain_text_ner", [])
-            obj_list = entity_data.get("obj_list", [])
-            if obj_list == '':
-                obj_list = []
-            image_ner = plain_text_ner + obj_list
+            text, image, label = self.df.iloc[index, 1:4].values
             img_path = os.path.join(self.args.data_dir,self.args.dataset, image)
-            text = preprocess_text(title)
-            
-        image_entity_embeds = []
-        text_entity_embeds = []
+        
+        text = preprocess_text(text)
+        sentiment_output = sentiment_predict(text, self.sentiment_config, self.sentiment_model)   
+        entity_data = self.entity_df.iloc[index]
+        text_ner = entity_data['title_ner']
+        plain_text_ner = entity_data.get("plain_text_ner", [])
+        obj_list = entity_data.get("obj_list", [])
+        if obj_list == '':
+            obj_list = []
+        image_ner = plain_text_ner + obj_list
+        if not text_ner and not image_ner:
+            return None
+        text_entity_embeds = torch.empty((0, 768), device=self.args.device)
+        image_entity_embeds = torch.empty((0, 768), device=self.args.device)
         graph_data = None
-        sentiment_output = sentiment_predict(text, self.sentiment_config, self.sentiment_model)
-        if self.args.method in ['FND-2-SGAT','Weibo17','Weibo21']:
+        if self.args.method in ['FND-2-SGAT']:
             text_tokens = self.text_tokenizer(text, max_length=self.max_length, add_special_tokens=True, truncation=True, 
                                         padding='max_length', return_tensors="pt")
-            original_shape = (1, 3, 224, 224)
-            zero_img_inputs = torch.zeros(original_shape)
             if text_ner:
                 text_entity_embeds = self.clip_encoder.get_entity_features(text_ner)
             if image_ner:
                 image_entity_embeds = self.clip_encoder.get_entity_features(image_ner)
-                
             try:
                 if os.path.exists(img_path) and os.path.isfile(img_path):
                     image = Image.open(os.path.join(img_path)).convert("RGB")
                     image = self.transforms(image)
-                    fft_imge = extract_spectral_features(img_path,output_dim=(128, 128))
-                    fft_imge = torch.tensor(fft_imge).to(self.args.device)
+                    fft_image = extract_spectral_features(img_path,output_dim=(128, 128))
+                    fft_image = torch.tensor(fft_image).to(self.args.device)
                     img_inputs = self.image_tokenizer(images=image, return_tensors="pt").pixel_values
                     text_feature,img_feature =  self.clip_encoder.get_features(text,img_path)
-                    if text_entity_embeds  == []:
+                    if text_entity_embeds.numel() == 0:
                         text_entity_embeds = text_feature
-                        
                     else:
                         text_entity_embeds = torch.cat((text_feature, text_entity_embeds), dim=0)
-                    if image_entity_embeds == []:
+                    if image_entity_embeds.numel() == 0:
                         image_entity_embeds = img_feature
                     else:
                         image_entity_embeds = torch.cat((img_feature, image_entity_embeds), dim=0)
                     graph_data = self.graph_builder.build_graph(text_entity_embeds,image_entity_embeds)
                 else:
-                    img_inputs = zero_img_inputs
-                    fft_imge = None  
+                    logger.info(f"Image {img_path} does not exist. Skipping.")
+                    return None 
             except Exception as e:
-                print(f"Error loading image {img_path}: {e}")
-                img_inputs = zero_img_inputs
-                fft_imge = None  
-            return img_inputs, fft_imge, sentiment_output, text_tokens['input_ids'], text_tokens['token_type_ids'], text_tokens['attention_mask'], graph_data, label
+                logger.info(f"Error loading image {img_path}: {e}")
+                return None
+            return img_inputs, fft_image, sentiment_output, text_tokens['input_ids'], text_tokens['token_type_ids'], text_tokens['attention_mask'], graph_data, label
         
 
 
@@ -294,7 +252,8 @@ class GraphBuilder:
             adj_tt.fill_diagonal_(False)
             edges_tt = adj_tt.nonzero(as_tuple=False) # Get indices where similarity > threshold
             for i in range(edges_tt.size(0)):
-                u, v = edges_tt[i, 0].item(), edges_tt[i, 1].item()
+                u = int(edges_tt[i, 0].item())
+                v = int(edges_tt[i, 1].item())
                 # Add edge only once for pairs (u, v) where u < v to avoid duplicates with reverse edges
                 if u < v:
                     weight = sim_tt[u, v].item()
@@ -309,7 +268,8 @@ class GraphBuilder:
             # Offset indices by num_text
             base_idx_i = num_text
             for i in range(edges_ii.size(0)):
-                u, v = edges_ii[i, 0].item(), edges_ii[i, 1].item()
+                u = int(edges_ii[i, 0].item())
+                v = int(edges_ii[i, 1].item())
                 if u < v:
                     weight = sim_ii[u, v].item()
                     add_edge(base_idx_i + u, base_idx_i + v, weight)
@@ -323,7 +283,8 @@ class GraphBuilder:
             # Offset image indices by num_text
             base_idx_i = num_text
             for i in range(edges_ti.size(0)):
-                u, v = edges_ti[i, 0].item(), edges_ti[i, 1].item() # u is text idx, v is image idx
+                u = int(edges_ti[i, 0].item())
+                v = int(edges_ti[i, 1].item())
                 weight = sim_ti[u, v].item()
                 add_edge(u, base_idx_i + v, weight) # Connect text node u to image node (base_idx_i + v)
 

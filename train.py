@@ -11,7 +11,7 @@ from torch.nn.parallel import DataParallel
 from sklearn.metrics import accuracy_score, f1_score, precision_score , recall_score, confusion_matrix, roc_curve, auc
 from sklearn.manifold import TSNE
 from model.model import MyModel 
-from data.dataloader import GraphDataLoader, MMDataLoader, TextDataLoader, ImageDataLoader
+from data.graph_mutil_modal_dataloader import GraphDataLoader, MMDataLoader, TextDataLoader, ImageDataLoader
 from utils.metrics import collect_metrics
 from utils.functions import save_checkpoint, load_checkpoint, dict_to_str
 import matplotlib.pyplot as plt

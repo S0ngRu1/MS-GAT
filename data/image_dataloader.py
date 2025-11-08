@@ -46,10 +46,10 @@ class ImageDataset(Dataset):
                 img_inputs = self.image_tokenizer(images=image, return_tensors="pt").pixel_values
                 return img_inputs, label
             else:
-                print(f"Image {img_path} does not exist. Skipping.")
+                logger.info(f"Image {img_path} does not exist. Skipping.")
                 return None 
         except OSError as e:
-            print(f"Error loading image {img_path}: {e}. Skipping.")
+            logger.info(f"Error loading image {img_path}: {e}. Skipping.")
             return None  
         
     
@@ -58,7 +58,7 @@ def custom_collate_fn_imagedata(batch):
     valid_batch = [item for item in batch if item is not None]
     if not valid_batch:
         return [], []
-    img_inputs = torch.cat([item[0] for item in valid_batch], dim=0)  
+    img_inputs = torch.stack([item[0] for item in valid_batch])  
     labels = torch.tensor([item[1] for item in valid_batch])  
     return img_inputs, labels
         
@@ -78,5 +78,5 @@ def image_data_loader(args):
                         shuffle=False, pin_memory=False, drop_last=True, collate_fn=custom_collate_fn_imagedata)
         return train_loader, valid_loader, test_loader
     else:
-        logger.info('数据集无效')
-        return None, None, None
+        logger.error(f'无效数据集: {args.dataset}，支持的数据集为 ["Weibo17", "Weibo21", "CFND_dataset"]')
+        raise ValueError("无效数据集，请检查参数")

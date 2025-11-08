@@ -13,7 +13,7 @@ import shutil
 from model.model import MyModel
 from model.text_encoder import TextEncoder
 from model.image_encoder import ImageEncoder
-from data.dataloader import preprocess_text
+from data.graph_mutil_modal_dataloader import preprocess_text
 
 
 def load_model(args, checkpoint_path):

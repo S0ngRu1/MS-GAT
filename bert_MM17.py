@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from torch.nn.parallel import DataParallel
 from sklearn.metrics import accuracy_score , recall_score
 from model.text_encoder import TextEncoder
-from data.dataloader import MMDataLoader , TextDataLoader
+from data.graph_mutil_modal_dataloader import MMDataLoader , TextDataLoader
 from utils.metrics import collect_metrics
 from utils.functions import save_checkpoint, load_checkpoint, dict_to_str, count_parameters
 import time
