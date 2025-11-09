@@ -303,8 +303,8 @@ class MyModel(nn.Module):
                 embed_dim=768,
                 gnn_hidden_dim=128,
                 num_gat_layers=1,
-                gat_heads=4,
-                dropout_rate=0.5,
+                gat_heads=8,
+                dropout_rate=0.3,
                 num_classes=2
             )
             
@@ -469,18 +469,14 @@ class Classifier(nn.Module):
     def __init__(self, dropout, in_dim, out_dim):
         super(Classifier, self).__init__()
         self.post_dropout = nn.Dropout(p=dropout)
-        self.hidden_1 = LinearLayer(in_dim, 2048)      
-        self.hidden_2 = LinearLayer(2048, 256)
-        self.hidden_3 = LinearLayer(256, 64)
-        self.classify = LinearLayer(64, out_dim)
+        self.hidden_layer = LinearLayer(in_dim, 256)   
+        self.leaky_relu = nn.LeakyReLU(negative_slope=0.01, inplace=False)   
+        self.classify = LinearLayer(256, out_dim)
 
     def forward(self, input):
-        input_p1 = F.relu(self.hidden_1(input), inplace=False)
-        input_d1 = self.post_dropout(input_p1)
-        input_p2 = F.relu(self.hidden_2(input_d1), inplace=False)
-        input_d2 = self.post_dropout(input_p2)
-        input_p3 = F.relu(self.hidden_3(input_d2), inplace=False)
-        output = self.classify(input_p3)
+        hidden_output = self.leaky_relu(self.hidden_layer(input))
+        hidden_output_drop = self.post_dropout(hidden_output)
+        output = self.classify(hidden_output_drop)
         return output
 
 

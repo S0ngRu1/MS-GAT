@@ -110,7 +110,7 @@ def custom_collate_fn_mmdata(batch):
         return batch_images, fft_images, sentiment_outputs, text_features, batch_labels
 
 
-def MMDataLoader(args):
+def mm_data_loader(args):
     if args.dataset in ['Weibo17','Weibo21','CFND_dataset']:
         train_set = MMDataset(args, mode='train')
         valid_set = MMDataset(args, mode='val')

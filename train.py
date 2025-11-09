@@ -11,74 +11,15 @@ from torch.nn.parallel import DataParallel
 from sklearn.metrics import accuracy_score, f1_score, precision_score , recall_score, confusion_matrix, roc_curve, auc
 from sklearn.manifold import TSNE
 from model.model import MyModel 
-from data.graph_mutil_modal_dataloader import GraphDataLoader, MMDataLoader, TextDataLoader, ImageDataLoader
+from data.graph_mutil_modal_dataloader import graph_data_loader
+from data.image_dataloader import image_data_loader
+from data.text_dataloader import text_dataloader
+from data.mutil_modal_dataloader import mm_data_loader
 from utils.metrics import collect_metrics
 from utils.functions import save_checkpoint, load_checkpoint, dict_to_str
 import matplotlib.pyplot as plt
 import seaborn as sns
 from loguru import logger
-
-
-def get_scheduler(optimizer, args):
-    return optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, "max", patience=args.lr_patience, verbose=True, factor=args.lr_factor
-    )
-
-
-def get_optimizer(model, args):
-    # 初始化参数列表
-    optimizer_grouped_parameters = []
-
-    # 文本编码器参数
-    if hasattr(model.module, 'text_encoder'):
-        text_enc_param = list(model.module.text_encoder.named_parameters())
-        optimizer_grouped_parameters.extend([
-            {"params": [p for n, p in text_enc_param if not any(nd in n for nd in ["bias", "LayerNorm.bias", "LayerNorm.weight"])],
-             "weight_decay": args.weight_decay_tfm, 'lr': args.lr_text_tfm},
-            {"params": [p for n, p in text_enc_param if any(nd in n for nd in ["bias", "LayerNorm.bias", "LayerNorm.weight"])], "weight_decay": 0.0,
-             'lr': args.lr_text_tfm},
-        ])
-
-    # 文本分类器参数
-    if hasattr(model.module, 'text_classfier'):
-        text_clf_param = list(model.module.text_classfier.parameters())
-        optimizer_grouped_parameters.append(
-            {"params": text_clf_param, "weight_decay": args.weight_decay_other, 'lr': args.lr_text_cls}
-        )
-
-    # 图像编码器参数
-    if hasattr(model.module, 'image_encoder'):
-        img_enc_param = list(model.module.image_encoder.parameters())
-        optimizer_grouped_parameters.append(
-            {"params": img_enc_param, "weight_decay": args.weight_decay_tfm, 'lr': args.lr_img_tfm}
-        )
-
-    # 图像分类器参数
-    if hasattr(model.module, 'image_classfier'):
-        img_clf_param = list(model.module.image_classfier.parameters())
-        optimizer_grouped_parameters.append(
-            {"params": img_clf_param, "weight_decay": args.weight_decay_other, 'lr': args.lr_img_cls}
-        )
-
-    # 多模态分类器参数
-    if hasattr(model.module, 'mm_classfier'):
-        mm_clf_param = list(model.module.mm_classfier.parameters())
-        optimizer_grouped_parameters.append(
-            {"params": mm_clf_param, "weight_decay": args.weight_decay_other, 'lr': args.lr_mm_cls}
-        )
-    
-    # 多模态分类器参数
-    if hasattr(model.module, 'sgat_layer'):
-        sgat_layer = list(model.module.sgat_layer.parameters())
-        optimizer_grouped_parameters.append(
-            {"params": sgat_layer, "weight_decay": args.weight_decay_other, 'lr': args.lr_mm_cls}
-        )
-
-    # 创建优化器
-    optimizer = optim.Adam(optimizer_grouped_parameters)
-
-    return optimizer
-
 
 
 def valid(args, run, model, data=None, best_valid=None, nBetter=None, step=None):
@@ -713,23 +654,22 @@ def visualize_results(args, true_labels, predictions, method, logits):
 
 def train(args):
     if args.method in ['BERT']:
-        train_loader, valid_loader, test_loader = TextDataLoader(args)
+        train_loader, valid_loader, test_loader = text_dataloader(args)
     elif args.method in ['ViT']:
-        train_loader, valid_loader, test_loader = ImageDataLoader(args) 
+        train_loader, valid_loader, test_loader = image_data_loader(args) 
     elif args.method in ['FND-2-SGAT']:
-        train_loader, valid_loader, test_loader = GraphDataLoader(args) 
+        train_loader, valid_loader, test_loader = graph_data_loader(args) 
     else:
-        train_loader, valid_loader, test_loader = MMDataLoader(args)
+        train_loader, valid_loader, test_loader = mm_data_loader(args)
     data = train_loader, valid_loader, test_loader
     model = DataParallel(MyModel(args))
     model = model.to(args.device)
-    
-    optimizer = get_optimizer(model, args)
-    scheduler = get_scheduler(optimizer, args)
+
+    optimizer = optim.Adam(model.parameters(),  lr=args.lr, weight_decay=args.weight_decay)
 
     if args.train_test:
         logger.info("Start training...")
-        best_results = train_valid(args, model, optimizer, scheduler, data)
+        best_results = train_valid(args, model, optimizer, data)
 
     load_checkpoint(model, args.best_model_save_path)
 

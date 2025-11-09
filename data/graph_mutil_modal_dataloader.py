@@ -39,7 +39,7 @@ def custom_collate_fn(batch):
     return (batch_image, fft_image, sentiment_output, text_input_ids, text_token_type_ids, text_attention_mask, graph_batch, batch_label)
 
 
-def GraphDataLoader(args):
+def graph_data_loader(args):
     if args.dataset in ['Weibo17','Weibo21','CFND_dataset']:
         train_set = GraphDataset(args, mode='train')
         valid_set = GraphDataset(args, mode='val')
