@@ -1,12 +1,15 @@
 import time
 import random
 import torch
-from loguru import logger
 import argparse
 import os
 import numpy as np
 import warnings
+
+from loguru import logger
+
 from train import train
+
 torch.cuda.current_device()
 str_time = time.strftime("%Y%m%d-%H%M%S", time.localtime())
 
