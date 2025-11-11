@@ -7,7 +7,6 @@ import wandb
 from torch import optim
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn.parallel import DataParallel
 from sklearn.metrics import accuracy_score, f1_score, precision_score , recall_score, confusion_matrix, roc_curve, auc
 from sklearn.manifold import TSNE
 from model.model import MyModel 
@@ -18,7 +17,6 @@ from data.mutil_modal_dataloader import mm_data_loader
 from utils.metrics import collect_metrics
 from utils.functions import save_checkpoint, load_checkpoint, dict_to_str
 import matplotlib.pyplot as plt
-import seaborn as sns
 from loguru import logger
 
 
@@ -662,17 +660,14 @@ def train(args):
     else:
         train_loader, valid_loader, test_loader = mm_data_loader(args)
     data = train_loader, valid_loader, test_loader
-    model = DataParallel(MyModel(args))
-    model = model.to(args.device)
+    model = MyModel(args).to(args.device)
 
     optimizer = optim.Adam(model.parameters(),  lr=args.lr, weight_decay=args.weight_decay)
 
     if args.train_test:
         logger.info("Start training...")
-        best_results = train_valid(args, model, optimizer, data)
-
-    load_checkpoint(model, args.best_model_save_path)
-
-    te_prob, te_true = test_epoch(args,model, test_loader)
-    logger.info("Test: " + dict_to_str(collect_metrics(args.dataset, te_true, te_prob)))
+        train_valid(args, model, optimizer, data)
+        load_checkpoint(model, args.best_model_save_path)
+        te_prob, te_true = test_epoch(args,model, test_loader)
+        logger.info("Test: " + dict_to_str(collect_metrics(args.dataset, te_true, te_prob)))
 

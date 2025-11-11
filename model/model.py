@@ -1,8 +1,8 @@
-from matplotlib import transforms
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from loguru import logger
 from torch_geometric.nn import GATConv, global_mean_pool
 from torch_geometric.data import Data
 from model.text_encoder import TextEncoder
@@ -52,7 +52,7 @@ class multimodal_attention(nn.Module):
 
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, model_dim=768, num_heads=8, dropout=0.2):
+    def __init__(self, model_dim=768, num_heads=8, dropout=0.3):
         super(MultiHeadAttention, self).__init__()
         
         self.model_dim = model_dim
@@ -105,7 +105,7 @@ class PositionalWiseFeedForward(nn.Module):
     """
     Fully-connected network 
     """
-    def __init__(self, model_dim=768, ffn_dim=2048, dropout=0.2):
+    def __init__(self, model_dim=768, ffn_dim=3072, dropout=0.3):
         super(PositionalWiseFeedForward, self).__init__()
         self.w1 = nn.Linear(model_dim, ffn_dim)
         self.w2 = nn.Linear(ffn_dim, model_dim)
@@ -129,13 +129,13 @@ class multimodal_fusion_layer(nn.Module):
     """
     A layer of fusing features 
     """
-    def __init__(self, model_dim=768, num_heads=8, ffn_dim=2048, dropout=0.2):
+    def __init__(self, model_dim=768):
         super(multimodal_fusion_layer, self).__init__()
-        self.attention_1 = MultiHeadAttention(model_dim, num_heads, dropout)
-        self.attention_2 = MultiHeadAttention(model_dim, num_heads, dropout)
+        self.attention_1 = MultiHeadAttention(model_dim)
+        self.attention_2 = MultiHeadAttention(model_dim)
         
-        self.feed_forward_1 = PositionalWiseFeedForward(model_dim, ffn_dim, dropout)
-        self.feed_forward_2 = PositionalWiseFeedForward(model_dim, ffn_dim, dropout)
+        self.feed_forward_1 = PositionalWiseFeedForward(model_dim)
+        self.feed_forward_2 = PositionalWiseFeedForward(model_dim)
         self.fusion_linear = nn.Linear(model_dim*2, model_dim)
 
     def forward(self, image_output, text_output, attn_mask=None):
@@ -145,7 +145,6 @@ class multimodal_fusion_layer(nn.Module):
         
         output_2 = self.attention_2(text_output, image_output, image_output,
                                  attn_mask)
-        #print('attention out_shape:{}'.format(output.shape))
         output_1 = self.feed_forward_1(output_1)
         output_2 = self.feed_forward_2(output_2)
         
@@ -268,205 +267,326 @@ class SimilarityGATFusionNet(nn.Module):
         return logits
 
 
-class MyModel(nn.Module):
-    def __init__(self, args, model_dim = 768, num_layers=1, num_heads=8, ffn_dim=2048, dropout=0.3):
-        super(MyModel, self).__init__()
+class BaseModel(nn.Module):
+    """基础模型类"""
+    def __init__(self, args, model_dim=768, dropout=0.3):
+        super().__init__()
         self.args = args
-        self.image_classfier = Classifier(dropout, model_dim,2)
-        self.text_classfier = Classifier(dropout, model_dim, 2)
-        self.fft_feature_dim = 128*128
-        self.log_var_a = nn.Parameter(torch.zeros(1))
-        self.log_var_b = nn.Parameter(torch.zeros(1))
-        self.log_var_c = nn.Parameter(torch.zeros(1))
+        self.model_dim = model_dim
+        self.image_classifier = Classifier(in_dim=self.model_dim, out_dim=2,dropout=dropout)
+        self.text_classifier = Classifier(in_dim=self.model_dim, out_dim=2,dropout=dropout)
+        self.fft_feature_dim = 128 * 128
+        
+        # 公共的FFT编码器
         self.fft_encoder = nn.Sequential(
-            nn.Conv2d(1, 16, kernel_size=3, stride=1, padding=1), # Input: B, 1, 128, 128
+            nn.Conv2d(1, 16, kernel_size=3, stride=1, padding=1),
             nn.ReLU(),
-            nn.MaxPool2d(kernel_size=2, stride=2), # B, 16, 64, 64
+            nn.MaxPool2d(kernel_size=2, stride=2),
             nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1),
             nn.ReLU(),
-            nn.MaxPool2d(kernel_size=2, stride=2), # B, 32, 32, 32
-            # Add more layers if needed
-            nn.AdaptiveAvgPool2d((1, 1)), # B, 32, 1, 1
-            nn.Flatten(), # B, 32
-            nn.Linear(32, model_dim) # Project to model_dim
+            nn.MaxPool2d(kernel_size=2, stride=2),
+            nn.AdaptiveAvgPool2d((1, 1)),
+            nn.Flatten(),
+            nn.Linear(32, model_dim)
         )
+        
+        # 公共的门控MLP
         self.image_gate_mlp = nn.Sequential(
             nn.Linear(model_dim * 2, model_dim),
             nn.Sigmoid()
         )
         self.text_gate_mlp = nn.Sequential(
-            nn.Linear(model_dim * 2, model_dim), # Assuming sentiment_feat is already model_dim
+            nn.Linear(model_dim * 2, model_dim),
             nn.Sigmoid()
         )
-        if self.args.method in ['FND-2-SGAT']:
-            self.sgat_layer = SimilarityGATFusionNet(
-                embed_dim=768,
-                gnn_hidden_dim=128,
-                num_gat_layers=1,
-                gat_heads=8,
-                dropout_rate=0.3,
-                num_classes=2
-            )
-            
-        if self.args.method not in ['FND-2-CLIP']:
-            self.image_encoder = ImageEncoder(pretrained_dir=args.pretrained_dir, image_encoder=args.image_encoder)
-            self.text_encoder = TextEncoder(pretrained_dir=args.pretrained_dir, text_encoder=args.text_encoder)
         
-        if self.args.method not in ['FND-2-SGAT']:
-            self.mm_classfier = Classifier(dropout, model_dim, 2)
-            self.self_attention = MultiHeadAttention(model_dim, num_heads, dropout)
-            self.fusion_layers = nn.ModuleList([
-                multimodal_fusion_layer(model_dim, num_heads, ffn_dim, dropout)
-                for _ in range(num_layers)
-            ])
+        # 公共损失计算
+        self.log_var_a = nn.Parameter(torch.zeros(1))
+        self.log_var_b = nn.Parameter(torch.zeros(1))
+        self.log_var_c = nn.Parameter(torch.zeros(1))
 
     def compute_loss(self, loss_a, loss_b, loss_c):
-        # 计算加权损失和正则项
         loss_weighted_a = 0.5 * torch.exp(-self.log_var_a) * loss_a + 0.5 * self.log_var_a
         loss_weighted_b = 0.5 * torch.exp(-self.log_var_b) * loss_b + 0.5 * self.log_var_b
         loss_weighted_c = 0.5 * torch.exp(-self.log_var_c) * loss_c + 0.5 * self.log_var_c
         return loss_weighted_a + loss_weighted_b + loss_weighted_c
-        
-    def forward(self, text=None, sentiment_text=None, image=None, fft_imge = None, label=None, infer=False, graph_data = None):
-        criterion = torch.nn.CrossEntropyLoss(reduction='none')
-
-        if self.args.method in ['FND-2']:
-            text = self.text_encoder(text=text)
-            bert_cls = text[:, 0, :]
-            sentiment_feat = sentiment_text.squeeze(1) 
-            gate = self.text_gate_mlp(torch.cat((bert_cls, sentiment_feat), dim=1))
-            fused_text_cls_feature = gate * bert_cls + (1 - gate) * sentiment_feat
-            # fused_text_cls_feature = text[:, 0, :]
-            
-            try:
-                image = torch.squeeze(image, 1)
-                image = self.image_encoder(pixel_values=image)
-            except Exception as e:
-                print(f"An error occurred: {e}")
-                image = torch.randn((2, 197, 768))
-            image_cls_feature = image[:, 0, :] 
-            batch_size = fft_imge.size(0)
-        
-            # Flatten FFT features: Shape [10, 128*128] = [10, 16384]
-            fft_imge = fft_imge.unsqueeze(1).float() # Add channel dim: B, 1, 128, 128
-            fft_feature = self.fft_encoder(fft_imge) # B, model_dim 
-            gate = self.image_gate_mlp(torch.cat((image_cls_feature, fft_feature), dim=1))
-            combined_image_feature = gate * image_cls_feature + (1 - gate) * fft_feature 
-            output_text = self.text_classfier(fused_text_cls_feature)
-            output_image = self.image_classfier(combined_image_feature)
-            for fusion_layer in self.fusion_layers:
-                fusion = fusion_layer( combined_image_feature,fused_text_cls_feature)   
-            output_mm = self.mm_classfier(fusion) 
-            if infer:
-                return output_mm
-            MMLoss_text = torch.mean(criterion(output_text, label))
-            MMLoss_image = torch.mean(criterion(output_image, label))
-            MMLoss_m = torch.mean(criterion(output_mm, label))
-            MMLoss_sum = MMLoss_m + MMLoss_text + MMLoss_image
-            # MMLoss_sum = self.compute_loss(MMLoss_text, MMLoss_image, MMLoss_m)
-            return MMLoss_sum, MMLoss_m, output_mm
-        
-        elif self.args.method in ['FND-2-CLIP']:
-            text = text.squeeze(1)
-            sentiment_feat = sentiment_text.squeeze(1) 
-            gate = self.text_gate_mlp(torch.cat((text, sentiment_feat), dim=1))
-            fused_text_cls_feature = gate * text + (1 - gate) * sentiment_feat
-            # fused_text_cls_feature = text[:, 0, :]
-            image_cls_feature = image.squeeze(1)
-        
-            # Flatten FFT features: Shape [10, 128*128] = [10, 16384]
-            fft_imge = fft_imge.unsqueeze(1).float() # Add channel dim: B, 1, 128, 128
-            fft_feature = self.fft_encoder(fft_imge) # B, model_dim 
-            gate = self.image_gate_mlp(torch.cat((image_cls_feature, fft_feature), dim=1))
-            combined_image_feature = gate * image_cls_feature + (1 - gate) * fft_feature 
-            output_text = self.text_classfier(fused_text_cls_feature)
-            output_image = self.image_classfier(combined_image_feature)
-            for fusion_layer in self.fusion_layers:
-                fusion = fusion_layer( combined_image_feature,fused_text_cls_feature)   
-            output_mm = self.mm_classfier(fusion) 
-            if infer:
-                return output_mm
-            MMLoss_text = torch.mean(criterion(output_text, label))
-            MMLoss_image = torch.mean(criterion(output_image, label))
-            MMLoss_m = torch.mean(criterion(output_mm, label))
-            # MMLoss_sum = MMLoss_m + MMLoss_text + MMLoss_image
-            MMLoss_sum = self.compute_loss(MMLoss_text, MMLoss_image, MMLoss_m)
-            return MMLoss_sum, MMLoss_m, output_mm
-        
-        elif self.args.method in ['FND-2-SGAT']:
-            text = self.text_encoder(text=text)
-            bert_cls = text[:, 0, :]
-            sentiment_feat = sentiment_text.squeeze(1) 
-            gate = self.text_gate_mlp(torch.cat((bert_cls, sentiment_feat), dim=1))
-            fused_text_cls_feature = gate * bert_cls + (1 - gate) * sentiment_feat
-            try:
-                image = torch.squeeze(image, 1)
-                image = self.image_encoder(pixel_values=image)
-            except Exception as e:
-                print(f"An error occurred: {e}")
-                image = torch.randn((2, 197, 768))
-            image_cls_feature = image[:, 0, :] 
-            batch_size = fft_imge.size(0)
-            # Flatten FFT features: Shape [10, 128*128] = [10, 16384]
-            fft_imge = fft_imge.unsqueeze(1).float() # Add channel dim: B, 1, 128, 128
-            fft_feature = self.fft_encoder(fft_imge) # B, model_dim 
-            gate = self.image_gate_mlp(torch.cat((image_cls_feature, fft_feature), dim=1))
-            combined_image_feature = gate * image_cls_feature + (1 - gate) * fft_feature 
-            output_text = self.text_classfier(fused_text_cls_feature)
-            output_image = self.image_classfier(combined_image_feature)
-            if graph_data:
-                output_mm = self.sgat_layer(graph_data)
-            else:
-              output_mm = output_text
-            if infer:
-                return output_mm
-            MMLoss_text = torch.mean(criterion(output_text, label))
-            MMLoss_image = torch.mean(criterion(output_image, label))
-            MMLoss_m = torch.mean(criterion(output_mm, label))
-            # MMLoss_sum = 0.4*MMLoss_m + 0.3*MMLoss_text + 0.3*MMLoss_image
-            MMLoss_sum = self.compute_loss(MMLoss_text, MMLoss_image, MMLoss_m)
-            return MMLoss_sum, MMLoss_m, output_mm
-        
-        elif self.args.method in ['MCAN']:
-            text = self.text_encoder(text=text)
-            image = torch.squeeze(image, 1)
-            image = self.image_encoder(pixel_values=image)
-            output_text = self.text_classfier(text[:, 0, :])
-            output_image = self.image_classfier(image[:, 0, :])
-            for fusion_layer in self.fusion_layers:
-                fusion = fusion_layer( image[:, 0, :], text[:, 0, :])   
-            output_mm = self.mm_classfier(fusion)
-            if infer:
-                return output_mm
-            MMLoss_m = torch.mean(criterion(output_mm, label))
-            return MMLoss_m, MMLoss_m, output_mm
-
-        elif self.args.method in ['BERT']:
-            text = self.text_encoder(text=text)
-            output_text = self.text_classfier(text[:, 0, :])
-            if infer:
-                return output_text
-            Loss_text = torch.mean(criterion(output_text, label))
-            return Loss_text, Loss_text, output_text
-        
-        elif self.args.method in ['ViT']:
-            image = torch.squeeze(image, 1)
-            image = self.image_encoder(pixel_values=image)
-            output_image = self.image_classfier(image[:, 0, :])
-            if infer:
-                return output_image
-            Loss_image = torch.mean(criterion(output_image, label))
-            return Loss_image, Loss_image, output_image
-        
-        
-
-    def infer(self, text=None, sentiment_text=None, image=None, fft_imge = None,graph_data = None):
-        MMlogit = self.forward(text, sentiment_text, image, fft_imge, infer=True, graph_data = graph_data)
-        return MMlogit
 
 
+class FND2Model(BaseModel):
+    def __init__(self, args, **kwargs):
+        super().__init__(args,** kwargs)
+        self.image_encoder = ImageEncoder(pretrained_dir=args.pretrained_dir, image_encoder=args.image_encoder)
+        self.text_encoder = TextEncoder(pretrained_dir=args.pretrained_dir, text_encoder=args.text_encoder)
+        self.self_attention = MultiHeadAttention(self.model_dim, kwargs['num_heads'], kwargs['dropout'])
+        self.fusion_layers = nn.ModuleList([
+            multimodal_fusion_layer(self.model_dim)
+            for _ in range(kwargs['num_layers'])
+        ])
+        self.mm_classifier = Classifier(self.model_dim, 2, kwargs['dropout'])
+
+    def forward(self, text=None, sentiment_text=None, image=None, fft_imge=None, label=None, infer=False, graph_data=None):
+        criterion = nn.CrossEntropyLoss(reduction='none')
+        
+        if text is None:
+            raise ValueError("text cannot be None for FND-2 model")
+        text_feat = self.text_encoder(text=text)
+        bert_cls = text_feat[:, 0, :]
+        
+        if sentiment_text is None:
+            raise ValueError("sentiment_text cannot be None for FND-2 model")
+        sentiment_feat = sentiment_text.squeeze(1)  
+        text_gate = self.text_gate_mlp(torch.cat((bert_cls, sentiment_feat), dim=1))
+        fused_text = text_gate * bert_cls + (1 - text_gate) * sentiment_feat
+        
+        if image is None:
+            raise ValueError("image cannot be None for FND-2 model")
+        try:
+            image_squeezed = image.squeeze(1) 
+            image_feat = self.image_encoder(pixel_values=image_squeezed)
+        except Exception as e:
+            logger.info(f"Image encoding error: {e}")
+            image_feat = torch.randn((text.size(0), 197, self.model_dim), device=text.device)
+        image_cls = image_feat[:, 0, :]
+        
+        if fft_imge is None:
+            raise ValueError("fft_imge cannot be None for FND-2 model")
+        fft_imge = fft_imge.unsqueeze(1).float()
+        fft_feat = self.fft_encoder(fft_imge)
+        image_gate = self.image_gate_mlp(torch.cat((image_cls, fft_feat), dim=1))
+        combined_image = image_gate * image_cls + (1 - image_gate) * fft_feat
+        
+        output_text = self.text_classifier(fused_text)
+        output_image = self.image_classifier(combined_image)
+        
+        fusion = None
+        for layer in self.fusion_layers:
+            fusion = layer(combined_image, fused_text)
+        output_mm = self.mm_classifier(fusion)
+        if infer:
+            return output_mm
+        loss_text = torch.mean(criterion(output_text, label))
+        loss_image = torch.mean(criterion(output_image, label))
+        loss_mm = torch.mean(criterion(output_mm, label))
+        total_loss = loss_mm + loss_text + loss_image
+        return total_loss, loss_mm, output_mm
+
+class FND2CLIPModel(BaseModel):
+    def __init__(self, args, **kwargs):
+        super().__init__(args,** kwargs)
+        # CLIP不需要独立编码器（直接使用预提取特征）
+        self.self_attention = MultiHeadAttention(self.model_dim, kwargs['num_heads'], kwargs['dropout'])
+        self.fusion_layers = nn.ModuleList([
+            multimodal_fusion_layer(self.model_dim)
+            for _ in range(kwargs['num_layers'])
+        ])
+        self.mm_classifier = Classifier(self.model_dim, 2, kwargs['dropout'])
+
+    def forward(self, text=None, sentiment_text=None, image=None, fft_imge=None, label=None, infer=False, graph_data=None):
+        criterion = nn.CrossEntropyLoss(reduction='none')
+        
+        # 文本处理（CLIP文本特征直接输入）
+        if text is None or sentiment_text is None:
+            raise ValueError("text and sentiment_text cannot be None for CLIP model")
+        text_squeezed = text.squeeze(1)  # 确保输入非空
+        sentiment_feat = sentiment_text.squeeze(1)  # 确保输入非空
+        text_gate = self.text_gate_mlp(torch.cat((text_squeezed, sentiment_feat), dim=1))
+        fused_text = text_gate * text_squeezed + (1 - text_gate) * sentiment_feat
+        
+        # 图像处理（CLIP图像特征直接输入）
+        if image is None:
+            raise ValueError("image cannot be None for CLIP model")
+        image_cls = image.squeeze(1)  # 确保输入非空
+        
+        # FFT特征处理
+        if fft_imge is None:
+            raise ValueError("fft_imge cannot be None for CLIP model")
+        fft_imge = fft_imge.unsqueeze(1).float()
+        fft_feat = self.fft_encoder(fft_imge)
+        image_gate = self.image_gate_mlp(torch.cat((image_cls, fft_feat), dim=1))
+        combined_image = image_gate * image_cls + (1 - image_gate) * fft_feat
+        
+        # 分类与融合
+        output_text = self.text_classifier(fused_text)
+        output_image = self.image_classifier(combined_image)
+        
+        fusion = None
+        for layer in self.fusion_layers:
+            fusion = layer(combined_image, fused_text)
+        output_mm = self.mm_classifier(fusion)
+        
+        if infer:
+            return output_mm
+        
+        # 损失计算（使用加权损失）
+        loss_text = torch.mean(criterion(output_text, label))
+        loss_image = torch.mean(criterion(output_image, label))
+        loss_mm = torch.mean(criterion(output_mm, label))
+        total_loss = self.compute_loss(loss_text, loss_image, loss_mm)
+        return total_loss, loss_mm, output_mm
+    
+    
+class FND2SGATModel(BaseModel):
+    def __init__(self, args, **kwargs):
+        super().__init__(args,** kwargs)
+        # SGAT特有的图融合层
+        self.sgat_layer = SimilarityGATFusionNet(
+            embed_dim=768,
+            gnn_hidden_dim=128,
+            num_gat_layers=1,
+            gat_heads=8,
+            dropout_rate=0.3,
+            num_classes=2
+        )
+        # 基础编码器
+        self.image_encoder = ImageEncoder(pretrained_dir=args.pretrained_dir, image_encoder=args.image_encoder)
+        self.text_encoder = TextEncoder(pretrained_dir=args.pretrained_dir, text_encoder=args.text_encoder)
+
+    def forward(self, text=None, sentiment_text=None, image=None, fft_imge=None, label=None, infer=False, graph_data=None):
+        criterion = nn.CrossEntropyLoss(reduction='none')
+        
+        # 文本处理
+        if text is None or sentiment_text is None:
+            raise ValueError("text and sentiment_text cannot be None for SGAT model")
+        text_feat = self.text_encoder(text=text)
+        bert_cls = text_feat[:, 0, :]
+        sentiment_feat = sentiment_text.squeeze(1)  # 确保输入非空
+        text_gate = self.text_gate_mlp(torch.cat((bert_cls, sentiment_feat), dim=1))
+        fused_text = text_gate * bert_cls + (1 - text_gate) * sentiment_feat
+        
+        # 图像处理
+        if image is None:
+            raise ValueError("image cannot be None for SGAT model")
+        try:
+            image_squeezed = image.squeeze(1)  # 确保输入非空
+            image_feat = self.image_encoder(pixel_values=image_squeezed)
+        except Exception as e:
+            print(f"Image encoding error: {e}")
+            image_feat = torch.randn((text.size(0), 197, self.model_dim), device=text.device)
+        image_cls = image_feat[:, 0, :]
+        
+        # FFT特征处理
+        if fft_imge is None:
+            raise ValueError("fft_imge cannot be None for SGAT model")
+        fft_imge = fft_imge.unsqueeze(1).float()
+        fft_feat = self.fft_encoder(fft_imge)
+        image_gate = self.image_gate_mlp(torch.cat((image_cls, fft_feat), dim=1))
+        combined_image = image_gate * image_cls + (1 - image_gate) * fft_feat
+        
+        # 分类与图融合
+        output_text = self.text_classifier(fused_text)
+        output_image = self.image_classifier(combined_image)
+        
+        # 图融合（必须提供graph_data）
+        if graph_data is None:
+            output_mm = output_text  # 降级处理
+        else:
+            output_mm = self.sgat_layer(graph_data)
+        
+        if infer:
+            return output_mm
+        
+        # 损失计算
+        loss_text = torch.mean(criterion(output_text, label))
+        loss_image = torch.mean(criterion(output_image, label))
+        loss_mm = torch.mean(criterion(output_mm, label))
+        total_loss = self.compute_loss(loss_text, loss_image, loss_mm)
+        return total_loss, loss_mm, output_mm
+    
+
+class MCANModel(BaseModel):
+    def __init__(self, args, **kwargs):
+        super().__init__(args,** kwargs)
+        self.image_encoder = ImageEncoder(pretrained_dir=args.pretrained_dir, image_encoder=args.image_encoder)
+        self.text_encoder = TextEncoder(pretrained_dir=args.pretrained_dir, text_encoder=args.text_encoder)
+        self.fusion_layers = nn.ModuleList([
+            multimodal_fusion_layer(self.model_dim)
+        ])
+        self.mm_classifier = Classifier(self.model_dim, 2, kwargs['dropout'])
+
+    def forward(self, text=None, image=None, label=None, infer=False, **kwargs):
+        criterion = nn.CrossEntropyLoss(reduction='none')
+        if text is None or image is None:
+            raise ValueError("text and image cannot be None for MCAN model")
+        
+        text_feat = self.text_encoder(text=text)
+        image_squeezed = image.squeeze(1)  # 确保输入非空
+        image_feat = self.image_encoder(pixel_values=image_squeezed)
+        
+        output_text = self.text_classifier(text_feat[:, 0, :])
+        output_image = self.image_classifier(image_feat[:, 0, :])
+        
+        fusion = None
+        for layer in self.fusion_layers:
+            fusion = layer(image_feat[:, 0, :], text_feat[:, 0, :])
+        output_mm = self.mm_classifier(fusion)
+        
+        if infer:
+            return output_mm
+        
+        loss_mm = torch.mean(criterion(output_mm, label))
+        return loss_mm, loss_mm, output_mm
+
+
+class BERTModel(BaseModel):
+    def __init__(self, args,** kwargs):
+        super().__init__(args, **kwargs)
+        self.text_encoder = TextEncoder(pretrained_dir=args.pretrained_dir, text_encoder=args.text_encoder)
+
+    def forward(self, text=None, label=None, infer=False,** kwargs):
+        criterion = nn.CrossEntropyLoss(reduction='none')
+        if text is None:
+            raise ValueError("text cannot be None for BERT model")
+        
+        text_feat = self.text_encoder(text=text)
+        output_text = self.text_classifier(text_feat[:, 0, :])
+        
+        if infer:
+            return output_text
+        
+        loss_text = torch.mean(criterion(output_text, label))
+        return loss_text, loss_text, output_text
+
+
+class ViTModel(BaseModel):
+    def __init__(self, args, **kwargs):
+        super().__init__(args,** kwargs)
+        self.image_encoder = ImageEncoder(pretrained_dir=args.pretrained_dir, image_encoder=args.image_encoder)
+
+    def forward(self, image=None, label=None, infer=False, **kwargs):
+        criterion = nn.CrossEntropyLoss(reduction='none')
+        if image is None:
+            raise ValueError("image cannot be None for ViT model")
+        
+        image_squeezed = image.squeeze(1) 
+        image_feat = self.image_encoder(pixel_values=image_squeezed)
+        output_image = self.image_classifier(image_feat[:, 0, :])
+        
+        if infer:
+            return output_image
+        
+        loss_image = torch.mean(criterion(output_image, label))
+        return loss_image, loss_image, output_image
+
+
+def create_model(args,** kwargs):
+    """根据args.method创建对应的模型实例"""
+    method = args.method
+    if method == 'FND-2':
+        return FND2Model(args, **kwargs)
+    elif method == 'FND-2-CLIP':
+        return FND2CLIPModel(args,** kwargs)
+    elif method == 'FND-2-SGAT':
+        return FND2SGATModel(args, **kwargs)
+    elif method == 'MCAN':
+        return MCANModel(args,** kwargs)
+    elif method == 'BERT':
+        return BERTModel(args, **kwargs)
+    elif method == 'ViT':
+        return ViTModel(args,** kwargs)
+    else:
+        raise ValueError(f"Unknown method: {method}")
 class Classifier(nn.Module):
-    def __init__(self, dropout, in_dim, out_dim):
+    def __init__(self, in_dim, out_dim, dropout):
         super(Classifier, self).__init__()
         self.post_dropout = nn.Dropout(p=dropout)
         self.hidden_layer = LinearLayer(in_dim, 256)   
