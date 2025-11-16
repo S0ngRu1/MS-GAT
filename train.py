@@ -1,21 +1,20 @@
 import os
-import logging
 import numpy as np
 from tqdm import tqdm
 import torch
 import wandb
 from torch import optim
-import torch.nn as nn
 import torch.nn.functional as F
 from sklearn.metrics import accuracy_score, f1_score, precision_score , recall_score, confusion_matrix, roc_curve, auc
 from sklearn.manifold import TSNE
-from model.model import MyModel 
+from model.model import create_model 
 from data.graph_mutil_modal_dataloader import graph_data_loader
 from data.image_dataloader import image_data_loader
 from data.text_dataloader import text_dataloader
 from data.mutil_modal_dataloader import mm_data_loader
 from utils.metrics import collect_metrics
 from utils.functions import save_checkpoint, load_checkpoint, dict_to_str
+from utils.train_utils import compute_train_metrics,log_train_metrics
 import matplotlib.pyplot as plt
 from loguru import logger
 
@@ -227,356 +226,141 @@ def valid(args, run, model, data=None, best_valid=None, nBetter=None, step=None)
         return valid_results, best_valid, nBetter
 
 
-def train_valid(args, model, optimizer, scheduler=None, data=None):
+
+def train_bert(args, model, optimizer, data, run, logger):
+    best_valid = 1e-5
+    nBetter = 0
+    total_step = 0
+    gradient_accumulation_steps = 4  # BERT 特有的梯度累积
+    train_loader, valid_loader, _ = data
+    
+    for epoch in range(args.num_epoch):
+        model.train()
+        y_pred, y_true = [], []
+        train_loss_m = 0.0
+        
+        with tqdm(train_loader, desc=f'Epoch {epoch + 1}/{args.num_epoch}', unit='batch') as td:
+            for batch_idx, (batch_image, fft_imge, sentiment_output, text_input_ids, text_token_type_ids, text_attention_mask, batch_label) in enumerate(td):
+                # 数据移至设备（BERT 仅用文本数据）
+                text = (text_input_ids.to(args.device), 
+                        text_token_type_ids.to(args.device), 
+                        text_attention_mask.to(args.device))
+                labels = batch_label.to(args.device).view(-1)
+                
+                # 模型前向传播（仅文本输入）
+                loss, loss_m, logit_m = model(text, None, None, labels)
+                loss = loss.sum() / gradient_accumulation_steps  # 梯度累积时损失缩放
+                
+                # 反向传播（不立即更新参数）
+                loss.backward()
+                train_loss_m += loss_m.sum().item()
+                y_pred.append(logit_m.cpu())
+                y_true.append(batch_label.cpu())
+                total_step += 1
+                
+                # 每 30 个 batch 记录一次指标
+                if (batch_idx + 1) % 30 == 0:
+                    precision, recall, f1, _ = compute_train_metrics(y_pred, y_true)
+                    avg_loss = train_loss_m / (batch_idx + 1)
+                    log_train_metrics(run, logger, epoch, batch_idx, precision, recall, f1, avg_loss)
+                
+                # 梯度累积：每 N 步更新一次参数
+                if total_step % gradient_accumulation_steps == 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # BERT 特有的梯度裁剪
+                    optimizer.step()
+                    optimizer.zero_grad()
+                    total_step = 0
+        
+        # Epoch 结束时记录全局指标
+        precision, recall, f1, _ = compute_train_metrics(y_pred, y_true)
+        avg_loss = train_loss_m / len(train_loader)
+        log_train_metrics(run, logger, epoch, batch_idx, precision, recall, f1, avg_loss, is_epoch_end=True)
+        
+        # Epoch 结束后验证
+        _, best_valid, nBetter = run_validation(args, run, model, valid_loader, best_valid, nBetter)
+    
+    return best_valid
+
+
+def train_vit(args, model, optimizer, data, run, logger):
+    best_valid = 1e-5
+    nBetter = 0
+    total_step = 0
+    gradient_accumulation_steps = 4  # ViT 特有的梯度累积
+    train_loader, valid_loader, _ = data
+    
+    for epoch in range(args.num_epoch):
+        model.train()
+        y_pred, y_true = [], []
+        train_loss_m = 0.0
+        
+        with tqdm(train_loader, desc=f'Epoch {epoch + 1}/{args.num_epoch}', unit='batch') as td:
+            for batch_image, batch_label in td:  
+                image = batch_image.to(args.device)
+                labels = batch_label.to(args.device).view(-1)
+                
+                loss, loss_m, logit_m = model(None, image, None, labels)
+                loss = loss.sum() / gradient_accumulation_steps 
+                
+                # 反向传播
+                loss.backward()
+                train_loss_m += loss_m.sum().item()
+                y_pred.append(logit_m.cpu())
+                y_true.append(batch_label.cpu())
+                total_step += 1
+                
+                # 梯度累积：每 N 步更新一次参数
+                if total_step % gradient_accumulation_steps == 0:
+                    optimizer.step()
+                    optimizer.zero_grad()
+                    total_step = 0
+        
+        # Epoch 结束时记录全局指标
+        logits = torch.cat(y_pred)
+        tr_true = torch.cat(y_true).cpu().numpy()
+        tr_prob = F.softmax(logits, dim=1).cpu().numpy()
+        train_acc = accuracy_score(tr_true, tr_prob.argmax(1))
+        avg_loss = train_loss_m / len(train_loader)
+        logger.info(f'Epoch {epoch + 1} 结束, Training Accuracy: {train_acc:.4f}, Loss: {avg_loss:.4f}')
+        run.log({'train_loss': avg_loss, 'train_accuracy': train_acc})
+        
+        # Epoch 结束后验证
+        valid_results, best_valid, nBetter = valid(args, model, data=valid_loader, best_valid=best_valid, nBetter=nBetter)
+        logger.info(f'Epoch {epoch + 1}, Validation Results: {valid_results}')
+    
+    return best_valid
+
+
+def train_valid(args, model, optimizer, data):
+    # 初始化 wandb
     run = wandb.init(
-        # Set the wandb entity where your project will be logged (generally your team name).
-        entity= "AI-links",
-        # Set the wandb project where this run will be logged.
-        project = "FND",
-        name = args.model_name,
-        # Track hyperparameters and run metadata.
+        entity="AI-links",
+        project="FND",
+        name=args.model_name,
         config={
-        "learning_rate": args.lr_mm,
-        "dataset": args.dataset,
-        "epochs": args.num_epoch,
-        "batch_size": args.batch_size,
-    },
+            "learning_rate": args.lr_mm,
+            "dataset": args.dataset,
+            "epochs": args.num_epoch,
+            "batch_size": args.batch_size,
+        },
     )
     
-    if args.method in ['FND-2']:
-        best_valid = 1e-5
-        nBetter = 0
-        for epoch in range(args.num_epoch):
-            model.train()
-            train_loader, valid_loader, _ = data
-            y_pred = []
-            y_true = []
-            train_loss_m = 0
-            with tqdm(train_loader, desc=f'Epoch {epoch + 1}/{args.num_epoch}', unit='batch') as td:
-                for batch_idx, (batch_image, fft_imge, sentiment_output, text_input_ids, text_token_type_ids, text_attention_mask, batch_label) in enumerate(td):
-                    
-                    if torch.any(torch.isnan(batch_image)) or torch.any(torch.isnan(fft_imge)) or torch.any(torch.isnan(text_input_ids)) or torch.any(torch.isnan(sentiment_output)):
-                        logging.info("NaN detected in input data, skipping batch...")
-                        continue  # Skip this batch and continue training
-
-                    text = (text_input_ids.to(args.device), 
-                            text_token_type_ids.to(args.device), 
-                            text_attention_mask.to(args.device))
-                    sentiment_output = sentiment_output.to(args.device)
-                    image = (batch_image.to(args.device))
-                    fft_imge = (fft_imge.to(args.device))
-                    labels = batch_label.to(args.device).view(-1)
-                    loss, loss_m, logit_m = model(text, sentiment_output, image,fft_imge, labels)
-                    loss = loss.sum()
-                    # Check for NaN
-                    if torch.any(torch.isnan(loss)) or torch.any(torch.isinf(loss)):
-                        logging.info(f"NaN detected in loss, skipping batch...")
-                        continue  # Skip this batch and continue training
-                    loss.backward()
-                    train_loss_m += loss_m.sum().item()
-                    y_pred.append(logit_m.cpu())
-                    y_true.append(batch_label.cpu())
-                    optimizer.step()
-                    optimizer.zero_grad()
-                    if (batch_idx + 1) % 2 == 0:
-                        logits = torch.cat(y_pred)
-                        tr_true = torch.cat(y_true).data.cpu().numpy()
-                        tr_prob = F.softmax(logits, dim=1).data.cpu().numpy()
-                        train_precision = precision_score(tr_true, tr_prob.argmax(1), average='macro')
-                        train_recall = recall_score(tr_true, tr_prob.argmax(1), average='macro')
-                        train_f1 = f1_score(tr_true, tr_prob.argmax(1), average='macro')
-                        average_train_loss = train_loss_m / (batch_idx + 1)
-                        run.log({
-                            'train_loss': average_train_loss,
-                            'train_precision': train_precision,
-                            'train_recall': train_recall,
-                            'train_f1': train_f1
-                        })
-                        logger.info(f'Epoch {epoch + 1}, Batch {batch_idx + 1}, Training precision: {train_precision:.4f}, Recall: {train_recall:.4f}, F1: {train_f1:.4f}, Loss: {average_train_loss:.4f}')
-                    if (batch_idx + 1) % 300 == 0:
-                    # 验证集评估
-                        valid_results, best_valid, nBetter = valid(args, run, model, data=valid_loader, best_valid=best_valid, nBetter=nBetter)
-                        logger.info(f'Epoch {epoch + 1}, Validation Results: {valid_results}')
-            # Epoch 结束时记录一次全局指标
-            logits = torch.cat(y_pred)
-            tr_true = torch.cat(y_true).data.cpu().numpy()
-            tr_prob = F.softmax(logits, dim=1).data.cpu().numpy()
-            train_precision, train_recall, train_f1 = precision_score(tr_true, tr_prob.argmax(1), average='macro'), recall_score(tr_true, tr_prob.argmax(1), average='macro'), f1_score(tr_true, tr_prob.argmax(1), average='macro')
-            average_train_loss = train_loss_m / len(train_loader)
-            run.log({
-                'train_loss': average_train_loss,
-                'train_precision': train_precision,
-                'train_recall': train_recall,
-                'train_f1': train_f1
-            })
-            logger.info(f'Epoch {epoch + 1}, Training precision: {train_precision:.4f}, Loss: {average_train_loss:.4f}')
-
-            # 验证集评估
-            valid_results, best_valid, nBetter = valid(args, run, model, data=valid_loader, best_valid=best_valid, nBetter=nBetter)
-            logger.info(f'Epoch {epoch + 1}, Validation Results: {valid_results}')
-            if scheduler is not None:
-                scheduler.step(train_f1)
-
-        return best_valid
-    elif args.method in ['FND-2-CLIP']:
-        best_valid = 1e-5
-        nBetter = 0
-        for epoch in range(args.num_epoch):
-            model.train()
-            train_loader, valid_loader, _ = data
-            y_pred = []
-            y_true = []
-            train_loss_m = 0
-            with tqdm(train_loader, desc=f'Epoch {epoch + 1}/{args.num_epoch}', unit='batch') as td:
-                for batch_idx, (batch_image, fft_imge, sentiment_output, batch_text, batch_label) in enumerate(td):
-                    
-                    if torch.any(torch.isnan(batch_image)) or torch.any(torch.isnan(fft_imge)) or torch.any(torch.isnan(batch_text)) or torch.any(torch.isnan(sentiment_output)):
-                        logging.info("NaN detected in input data, skipping batch...")
-                        continue  # Skip this batch and continue training
-
-                    text = batch_text.to(args.device)
-                    sentiment_output = sentiment_output.to(args.device)
-                    image = (batch_image.to(args.device))
-                    fft_imge = (fft_imge.to(args.device))
-                    labels = batch_label.to(args.device).view(-1)
-                    loss, loss_m, logit_m = model(text, sentiment_output, image,fft_imge, labels)
-                    loss = loss.sum()
-                    # Check for NaN
-                    if torch.any(torch.isnan(loss)) or torch.any(torch.isinf(loss)):
-                        logging.info(f"NaN detected in loss, skipping batch...")
-                        continue  # Skip this batch and continue training
-                    loss.backward()
-                    train_loss_m += loss_m.sum().item()
-                    y_pred.append(logit_m.cpu())
-                    y_true.append(batch_label.cpu())
-                    optimizer.step()
-                    optimizer.zero_grad()
-                    if (batch_idx + 1) % 2 == 0:
-                        logits = torch.cat(y_pred)
-                        tr_true = torch.cat(y_true).data.cpu().numpy()
-                        tr_prob = F.softmax(logits, dim=1).data.cpu().numpy()
-                        train_precision = precision_score(tr_true, tr_prob.argmax(1), average='macro')
-                        train_recall = recall_score(tr_true, tr_prob.argmax(1), average='macro')
-                        train_f1 = f1_score(tr_true, tr_prob.argmax(1), average='macro')
-                        average_train_loss = train_loss_m / (batch_idx + 1)
-                        run.log({
-                            'train_loss': average_train_loss,
-                            'train_precision': train_precision,
-                            'train_recall': train_recall,
-                            'train_f1': train_f1
-                        })
-                        logger.info(f'Epoch {epoch + 1}, Batch {batch_idx + 1}, Training precision: {train_precision:.4f}, Recall: {train_recall:.4f}, F1: {train_f1:.4f}, Loss: {average_train_loss:.4f}')
-                    # if (batch_idx + 1) % 300 == 0:
-                    # # 验证集评估
-                    #     valid_results, best_valid, nBetter = valid(args, run, model, data=valid_loader, best_valid=best_valid, nBetter=nBetter)
-                    #     logger.info(f'Epoch {epoch + 1}, Validation Results: {valid_results}')
-            # Epoch 结束时记录一次全局指标
-            logits = torch.cat(y_pred)
-            tr_true = torch.cat(y_true).data.cpu().numpy()
-            tr_prob = F.softmax(logits, dim=1).data.cpu().numpy()
-            train_precision, train_recall, train_f1 = precision_score(tr_true, tr_prob.argmax(1), average='macro'), recall_score(tr_true, tr_prob.argmax(1), average='macro'), f1_score(tr_true, tr_prob.argmax(1), average='macro')
-            average_train_loss = train_loss_m / len(train_loader)
-            run.log({
-                'train_loss': average_train_loss,
-                'train_precision': train_precision,
-                'train_recall': train_recall,
-                'train_f1': train_f1
-            })
-            logger.info(f'Epoch {epoch + 1}, Training precision: {train_precision:.4f}, Loss: {average_train_loss:.4f}')
-
-            # 验证集评估
-            valid_results, best_valid, nBetter = valid(args, run, model, data=valid_loader, best_valid=best_valid, nBetter=nBetter)
-            logger.info(f'Epoch {epoch + 1}, Validation Results: {valid_results}')
-            if scheduler is not None:
-                scheduler.step(train_f1)
-
-        return best_valid
+    # 根据 method 路由到对应训练函数
+    method_trainers = {
+        'FND-2': train_fnd2,
+        'FND-2-CLIP': train_fnd2_clip,
+        'FND-2-SGAT': train_fnd2_sgat,
+        'BERT': train_bert,
+        'ViT': train_vit
+    }
     
-    elif args.method in ['FND-2-SGAT']:
-        best_valid = 1e-5
-        nBetter = 0
-        for epoch in range(args.num_epoch):
-            model.train()
-            train_loader, valid_loader, _ = data
-            y_pred = []
-            y_true = []
-            train_loss_m = 0
-            with tqdm(train_loader, desc=f'Epoch {epoch + 1}/{args.num_epoch}', unit='batch') as td:
-                for batch_idx, (batch_image, fft_imge, sentiment_output, text_input_ids, text_token_type_ids, text_attention_mask, graph_data, batch_label) in enumerate(td):
-                    
-                    if torch.any(torch.isnan(batch_image)) or torch.any(torch.isnan(fft_imge)) or torch.any(torch.isnan(text_input_ids)) or torch.any(torch.isnan(sentiment_output)):
-                        logging.info("NaN detected in input data, skipping batch...")
-                        continue  # Skip this batch and continue training
-
-                    text = (text_input_ids.to(args.device), 
-                            text_token_type_ids.to(args.device), 
-                            text_attention_mask.to(args.device))
-                    sentiment_output = sentiment_output.to(args.device)
-                    image = (batch_image.to(args.device))
-                    fft_imge = (fft_imge.to(args.device))
-                    labels = batch_label.to(args.device).view(-1)
-                    graph_data = graph_data.to(args.device)
-                    loss, loss_m, logit_m = model(text, sentiment_output, image,fft_imge, labels, graph_data = graph_data)
-                    loss = loss.sum()
-                    # Check for NaN
-                    if torch.any(torch.isnan(loss)) or torch.any(torch.isinf(loss)):
-                        logging.info(f"NaN detected in loss, skipping batch...")
-                        continue  # Skip this batch and continue training
-                    loss.backward()
-                    train_loss_m += loss_m.sum().item()
-                    y_pred.append(logit_m.cpu())
-                    y_true.append(batch_label.cpu())
-                    optimizer.step()
-                    optimizer.zero_grad()
-                    if (batch_idx + 1) % 2 == 0:
-                        logits = torch.cat(y_pred)
-                        tr_true = torch.cat(y_true).data.cpu().numpy()
-                        tr_prob = F.softmax(logits, dim=1).data.cpu().numpy()
-                        train_precision = precision_score(tr_true, tr_prob.argmax(1), average='macro')
-                        train_recall = recall_score(tr_true, tr_prob.argmax(1), average='macro')
-                        train_f1 = f1_score(tr_true, tr_prob.argmax(1), average='macro')
-                        average_train_loss = train_loss_m / (batch_idx + 1)
-                        run.log({
-                            'train_loss': average_train_loss,
-                            'train_precision': train_precision,
-                            'train_recall': train_recall,
-                            'train_f1': train_f1
-                        })
-                        logger.info(f'Epoch {epoch + 1}, Batch {batch_idx + 1}, Training precision: {train_precision:.4f}, Recall: {train_recall:.4f}, F1: {train_f1:.4f}, Loss: {average_train_loss:.4f}')
-                    # if (batch_idx + 1) % 300 == 0:
-                    # # 验证集评估
-                    #     valid_results, best_valid, nBetter = valid(args, run, model, data=valid_loader, best_valid=best_valid, nBetter=nBetter)
-                    #     logger.info(f'Epoch {epoch + 1}, Validation Results: {valid_results}')
-            # Epoch 结束时记录一次全局指标
-            logits = torch.cat(y_pred)
-            tr_true = torch.cat(y_true).data.cpu().numpy()
-            tr_prob = F.softmax(logits, dim=1).data.cpu().numpy()
-            train_precision, train_recall, train_f1 = precision_score(tr_true, tr_prob.argmax(1), average='macro'), recall_score(tr_true, tr_prob.argmax(1), average='macro'), f1_score(tr_true, tr_prob.argmax(1), average='macro')
-            average_train_loss = train_loss_m / len(train_loader)
-            run.log({
-                'train_loss': average_train_loss,
-                'train_precision': train_precision,
-                'train_recall': train_recall,
-                'train_f1': train_f1
-            })
-            logger.info(f'Epoch {epoch + 1}, Training precision: {train_precision:.4f}, Loss: {average_train_loss:.4f}')
-
-            # 验证集评估
-            valid_results, best_valid, nBetter = valid(args, run, model, data=valid_loader, best_valid=best_valid, nBetter=nBetter)
-            logger.info(f'Epoch {epoch + 1}, Validation Results: {valid_results}')
-            if scheduler is not None:
-                scheduler.step(train_f1)
-
-        return best_valid
+    if args.method not in method_trainers:
+        raise ValueError(f"不支持的 method: {args.method}，可选值: {list(method_trainers.keys())}")
     
-    elif args.method in ['BERT']:
-        best_valid = 1e-5
-        nBetter = 0
-        total_step = 0
-        gradient_accumulation_steps = 4
-        for epoch in range(args.num_epoch):
-            model.train()
-            train_loader, valid_loader, test_loader = data
-            y_pred = []
-            y_true = []
-            train_loss_m = 0
-            with tqdm(train_loader, desc=f'Epoch {epoch + 1}/{args.num_epoch}', unit='batch') as td:
-                for batch_idx, (batch_image, fft_imge, sentiment_output, text_input_ids, text_token_type_ids, text_attention_mask, batch_label) in enumerate(td):
-                    text = (text_input_ids.to(args.device), text_token_type_ids.to(args.device), text_attention_mask.to(args.device))
-                    labels = batch_label.to(args.device).view(-1)
-                    loss, loss_m, logit_m = model(text, None, None, labels)
-                    loss = loss.sum()
-                    loss.backward()
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                    train_loss_m += loss_m.sum().item()
-                    y_pred.append(logit_m.cpu())
-                    y_true.append(batch_label.cpu())
-                    total_step += 1
-
-                    if (batch_idx + 1) % 30 == 0:
-                        logits = torch.cat(y_pred)
-                        tr_true = torch.cat(y_true).data.cpu().numpy()
-                        tr_prob = F.softmax(logits, dim=1).data.cpu().numpy()
-                        train_precision = precision_score(tr_true, tr_prob.argmax(1), average='macro')
-                        train_recall = recall_score(tr_true, tr_prob.argmax(1), average='macro')
-                        train_f1 = f1_score(tr_true, tr_prob.argmax(1), average='macro')
-                        average_train_loss = train_loss_m / (batch_idx + 1)
-                        run.log({
-                            'train_loss': average_train_loss,
-                            'train_precision': train_precision,
-                            'train_recall': train_recall,
-                            'train_f1': train_f1
-                        })
-                        logger.info(f'Epoch {epoch + 1}, Batch {batch_idx + 1}, Training precision: {train_precision:.4f}, Recall: {train_recall:.4f}, F1: {train_f1:.4f}, Loss: {average_train_loss:.4f}')
-                    
-                    # 梯度累积
-                    if total_step % gradient_accumulation_steps == 0:
-                        
-                        optimizer.step()
-                        optimizer.zero_grad()
-                        total_step = 0  
-            # Epoch 结束时记录一次全局指标
-            logits = torch.cat(y_pred)
-            tr_true = torch.cat(y_true).data.cpu().numpy()
-            tr_prob = F.softmax(logits, dim=1).data.cpu().numpy()
-            train_precision, train_recall, train_f1 = precision_score(tr_true, tr_prob.argmax(1), average='macro'), recall_score(tr_true, tr_prob.argmax(1), average='macro'), f1_score(tr_true, tr_prob.argmax(1), average='macro')
-            average_train_loss = train_loss_m / len(train_loader)
-            run.log({
-                'train_loss': average_train_loss,
-                'train_precision': train_precision,
-                'train_recall': train_recall,
-                'train_f1': train_f1
-            })
-            logger.info(f'Epoch {epoch + 1}, Training precision: {train_precision:.4f}, Loss: {average_train_loss:.4f}')
-
-            # 验证集评估
-            valid_results, best_valid, nBetter = valid(args, run, model, data=valid_loader, best_valid=best_valid, nBetter=nBetter)
-            logger.info(f'Epoch {epoch + 1}, Validation Results: {valid_results}')
-            if scheduler is not None:
-                scheduler.step(train_precision)
-
-        return best_valid
-    
-    elif args.method in ['ViT']:
-        best_valid = 1e-5
-        nBetter = 0
-        total_step = 0
-        gradient_accumulation_steps = 4
-        for epoch in range(args.num_epoch):
-            model.train()
-            train_loader, valid_loader, test_loader = data
-            y_pred = []
-            y_true = []
-            train_loss_m = 0
-            with tqdm(train_loader, desc=f'Epoch {epoch + 1}/{args.num_epoch}', unit='batch') as td:
-                for batch_image,  batch_label in td:
-                    image = batch_image.to(args.device)
-                    labels = batch_label.to(args.device).view(-1)
-                    loss, loss_m, logit_m = model(None, image, None, labels)
-                    loss = loss.sum()
-                    loss.backward()
-                    train_loss_m += loss_m.sum().item()
-                    y_pred.append(logit_m.cpu())
-                    y_true.append(batch_label.cpu())
-                    total_step += 1
-                    if total_step % gradient_accumulation_steps == 0:
-                        optimizer.step()
-                        optimizer.zero_grad()
-                        total_step = 0  # Reset total_step after gradient update
-            # End of training for this epoch
-            logits = torch.cat(y_pred)
-            tr_true = torch.cat(y_true).data.cpu().numpy()
-            tr_prob = F.softmax(logits, dim=1).data.cpu().numpy()
-            train_precision = accuracy_score(tr_true, tr_prob.argmax(1))
-            average_train_loss = train_loss_m / len(train_loader)
-            logger.info(f'Epoch {epoch + 1}, Training Accuracy: {train_precision:.4f}, Loss: {average_train_loss:.4f}')
-            # Validation after each epoch
-            valid_results, best_valid, nBetter = valid(args, model, data=valid_loader, best_valid=best_valid, nBetter=nBetter)
-            logger.info(f'Epoch {epoch + 1}, Validation Results: {valid_results}')
-            if scheduler is not None:
-                scheduler.step(train_precision)  
-        return best_valid
-
+    # 调用对应训练函数
+    best_valid = method_trainers[args.method](args, model, optimizer, data, run, logger=logging)
+    run.finish() 
+    return best_valid
 
     
 def test_epoch(args, model, dataloader=None):
@@ -601,7 +385,8 @@ def test_epoch(args, model, dataloader=None):
                         logit = model.module.infer(text, None, None)
                     elif args.method == 'ViT':
                         logit = model.module.infer(None, image, None)
-
+                    else:
+                        raise ValueError(f"不支持的 method: {args.method}，请检查参数是否正确")
                     y_pred.append(logit.cpu())
                     y_true.append(batch_label.cpu())
         elif args.method in ['FND-2-SGAT']:
@@ -660,7 +445,7 @@ def train(args):
     else:
         train_loader, valid_loader, test_loader = mm_data_loader(args)
     data = train_loader, valid_loader, test_loader
-    model = MyModel(args).to(args.device)
+    model = create_model(args)
 
     optimizer = optim.Adam(model.parameters(),  lr=args.lr, weight_decay=args.weight_decay)
 
