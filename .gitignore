@@ -32,3 +32,4 @@ results/
 *.yml
 venv/
 process_data/GOT-OCR2_0/
+.env

@@ -27,7 +27,7 @@ class TextDataset(Dataset):
         if self.args.dataset in ['Weibo17','Weibo21']:
             text, label = self.df.iloc[index, 2:4 ].values
         elif self.args.dataset in ['CFND_dataset']:
-            text, label = self.df.iloc[index, 1:3 ].values
+            text, label = self.df.iloc[index, [1,3] ].values
             text = preprocess_text(text)
             text_tokens = self.text_tokenizer(text, max_length=self.max_length, add_special_tokens=True, truncation=True,
                                      padding='max_length', return_tensors="pt")
